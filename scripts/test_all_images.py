@@ -32,7 +32,7 @@ for i, row in df.iterrows():
 
 # 4. 存成 CSV 讓你可以直接畫圖
 results_df = pd.DataFrame(results)
-results_df.to_csv(r"C:\Users\tony9\Desktop\5000\results.csv", index=False)
+results_df.to_csv(r"C:\Users\tony9\Desktop\5000 - BETTER\results\results.csv", index=False)
 
 print("\n✅ 批量測試完成！結果已儲存至 results.csv")
 print("你可以直接用 Excel 開啟這個檔案，選中兩欄資料畫散佈圖！")

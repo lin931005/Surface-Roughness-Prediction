@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 # 1. 設定你的基本路徑 (根據你電腦的目錄)
-BASE_DIR = r"C:\Users\tony9\Desktop\5000"
+BASE_DIR = r"C:\Users\tony9\Desktop\5000 - BETTER\data"
 CSV_PATH = os.path.join(BASE_DIR, "label_data.csv") # 你在步驟一存好的 CSV
 
 # 2. 建立一個虛擬的對應字典 (如果你的 CSV 還沒做好，程式會先用這個示範數值跑跑看)

@@ -106,7 +106,7 @@ if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 目前使用的運算設備：{device}")
     
-    csv_file = r"C:\Users\tony9\Desktop\5000\final_training_manifest.csv"
+    csv_file = r"C:\Users\tony9\Desktop\5000 - BETTER\data\final_training_manifest.csv"
     
     if not os.path.exists(csv_file):
         print(f"❌ 錯誤：找不到 CSV 檔案！")
@@ -151,11 +151,11 @@ if __name__ == '__main__':
     print("-" * 50)
     print("訓練完成！")
     
-    model_save_path = os.path.join(os.path.dirname(csv_file), "best_surface_model.pth")
+    model_save_path = r"C:\Users\tony9\Desktop\5000 - BETTER\results\best_surface_model.pth"
     torch.save(model.state_dict(), model_save_path)
     print(f"💾 進化版模型大腦已成功儲存至：{model_save_path}")
     
     loss_df = pd.DataFrame({"Epoch": range(1, epochs+1), "Loss": loss_history})
-    loss_csv_path = os.path.join(os.path.dirname(csv_file), "loss_record.csv")
+    loss_csv_path = r"C:\Users\tony9\Desktop\5000 - BETTER\results\loss_record.csv"
     loss_df.to_csv(loss_csv_path, index=False)
     print(f"📊 Loss 歷史紀錄已儲存至：{loss_csv_path}")

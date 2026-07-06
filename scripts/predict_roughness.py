@@ -54,7 +54,7 @@ def predict_single_image(img_path, speed_rpm, condition_id):
     
     # 這裡改成新的模型名稱
     model = ResNetDualInputModel().to(device)
-    model_path = r"C:\Users\tony9\Desktop\5000\best_surface_model.pth"
+    model_path = r"C:\Users\tony9\Desktop\5000 - BETTER\results\best_surface_model.pth"
     
     # 載入你剛剛訓練好的 ResNet 權重
     model.load_state_dict(torch.load(model_path, map_location=device))

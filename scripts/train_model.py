@@ -1,5 +1,6 @@
 import os
 import random
+import inspect
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -183,9 +184,14 @@ def main():
     model = ResNetDualInputModel().to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=LR)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', patience=3, factor=0.5, verbose=True
-    )
+    scheduler_kwargs = {
+        'mode': 'min',
+        'patience': 3,
+        'factor': 0.5,
+    }
+    if 'verbose' in inspect.signature(optim.lr_scheduler.ReduceLROnPlateau).parameters:
+        scheduler_kwargs['verbose'] = True
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, **scheduler_kwargs)
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
 
     best_val_loss = float('inf')

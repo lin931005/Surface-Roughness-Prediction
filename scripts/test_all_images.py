@@ -3,7 +3,7 @@ import pandas as pd
 from predict_roughness import predict_single_image # 引用我們之前寫好的預測函式
 
 # 1. 讀取你的訓練清單
-csv_file = r"C:\Users\tony9\Desktop\5000\final_training_manifest.csv"
+csv_file = r"C:\Users\tony9\Desktop\5000 - BETTER\data\final_training_manifest.csv"
 df = pd.DataFrame(pd.read_csv(csv_file))
 
 # 2. 建立儲存預測結果的清單

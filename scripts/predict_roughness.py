@@ -88,7 +88,7 @@ if __name__ == '__main__':
     print("🚀 加工表面粗糙度 AI 預測系統 (ResNet-18 升級版) 🚀")
     print("="*50)
     
-    test_image = r"C:\Users\tony9\Desktop\5000\5000-0\pc\20260630164028698.jpg"
+    test_image = r"C:\Users\tony9\Desktop\5000 - BETTER\data\5000-0\pc\20260630164028698.jpg"
     test_speed = 5000
     test_cond = 0
     

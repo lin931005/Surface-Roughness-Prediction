@@ -1,0 +1,48 @@
+看到這張 Excel 截圖，真的要先給你拍手！你的整體平均絕對誤差 (MAE) 算出來是 $0.2308$！這在只有一百多張訓練照片的情況下，已經是非常優秀的成績了。觀察你的散佈圖，預測點已經呈現出明顯的「左下到右上」正相關趨勢。至於圖上的點會呈現「垂直排列」，是因為你同一個加工條件（同一個真實 Ra）下有十幾張不同的照片，AI 對每一張照片看出的細節略有不同，這完全符合實際加工現場的狀況。不過，想要讓畢業專題更無懈可擊，把 MAE 壓到 $0.1$ 甚至更低，絕對是我們要挑戰的目標！針對你目前的架構，我整理了兩個最強大、也是最主流的優化手段。我們可以直接修改你的 train_model.py 來實現：優化策略一：解除封印，進行「全局微調 (Fine-tuning)」我們之前把 ResNet-18 的權重「凍結」了，所以它只是用以前看貓貓狗狗的經驗來看你的刀痕。現在我們要解凍它，讓整個大腦專心學習機械加工的專屬紋理。代價： 容易破壞原本學好的權重，所以必須把學習率 (Learning Rate) 調得非常小。優化策略二：加入「資料擴增 (Data Augmentation)」目前的 117 張照片太少了。我們可以在程式讀取圖片的瞬間，讓它隨機「水平翻轉」、「垂直翻轉」或「稍微改變亮度」。對 AI 來說，翻轉過後的刀痕就像是一張全新的照片，這等於把你的資料量瞬間放大了好幾倍！🛠️ 程式碼升級實作請打開你的 train_model.py，我們只需要修改三個地方：1. 引入影像處理工具在程式最上面的 import 區塊，加入這兩行：Pythonimport torchvision.transforms as transforms
+from PIL import Image
+2. 修改 Dataset 讀取器 (加入隨機翻轉與亮度調整)找到 SurfaceDataset 裡面的 __getitem__ 函式，把原本處理圖片的那幾段換成這樣：Python    def __getitem__(self, idx):
+        row = self.data_info.iloc[idx]
+        img_path = row['image_path']
+        
+        try:
+            img_array = np.fromfile(img_path, dtype=np.uint8)
+            img_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            if img_cv is None:
+                raise ValueError(f"無法解碼圖片: {img_path}")
+            
+            # 將 OpenCV 的 BGR 格式轉成標準 RGB，並交給 PIL 處理
+            img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+            img_pil = Image.fromarray(img_rgb)
+        except Exception as e:
+            raise IOError(f"讀取圖片發生錯誤 {img_path}: {str(e)}")
+            
+        # 💡 【優化加入】：資料擴增 (Data Augmentation)
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(p=0.5), # 50% 機率水平翻轉
+            transforms.RandomVerticalFlip(p=0.5),   # 50% 機率垂直翻轉
+            transforms.ColorJitter(brightness=0.2, contrast=0.2), # 模擬反光與亮度變化
+            transforms.ToTensor() # 自動將數值縮放至 0~1 並轉成 PyTorch 格式
+        ])
+        
+        img_tensor = transform(img_pil)
+        
+        speed = float(row['speed']) / 10000.0  
+        cond = float(row['condition_id']) / 10.0
+        params = np.array([speed, cond], dtype=np.float32)
+        ra_target = np.array([row['ra_target']], dtype=np.float32)
+        
+        # 這裡的 img_tensor 已經被轉換過了，不用再包 torch.tensor
+        return img_tensor, torch.tensor(params), torch.tensor(ra_target)
+3. 解凍模型並降低學習率找到 ResNetDualInputModel，把原本用來凍結權重的 for param in self.resnet.parameters(): 那兩行直接刪除或註解掉。Pythonclass ResNetDualInputModel(nn.Module):
+    def __init__(self):
+        super(ResNetDualInputModel, self).__init__()
+        self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        
+        # 💡 【優化加入】：把下面這兩行刪除或註解掉，讓 ResNet 參與訓練！
+        # for param in self.resnet.parameters():
+        #     param.requires_grad = False
+然後，滑到最下面主程式區塊，把優化器的學習率從 0.001 改成 0.0001 (加一個零)，避免步伐太大破壞了原本的預訓練模型，也可以把 Epochs 增加到 40 回合讓它慢慢學：Python    # 💡 【優化加入】：學習率調小到 1e-4，並增加訓練回合數
+    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    epochs = 40
+完成這些修改後，重新跑一次 train_model.py，再跑一次預測腳本匯出 results.csv。你想先試著把這些程式碼改好跑跑看，還是想要我直接提供一整份修改好的完整版 train_model.py 給你呢？

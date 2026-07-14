@@ -3,9 +3,11 @@ import torch
 import pandas as pd
 from predict_roughness import load_model, predict_images
 
-BASE_DIR = r"C:\Users\tony9\Desktop\5000 - BETTER"
-CSV_FILE = os.path.join(BASE_DIR, "data", "final_training_manifest.csv")
-RESULTS_PATH = os.path.join(BASE_DIR, "results", "results.csv")
+from project_root import str_path
+
+BASE_DIR = str_path()
+CSV_FILE = str_path('data', 'final_training_manifest.csv')
+RESULTS_PATH = str_path('results', 'results.csv')
 
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

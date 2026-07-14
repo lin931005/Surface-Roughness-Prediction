@@ -3,7 +3,9 @@ import pandas as pd
 from predict_roughness import load_model, predict_images, predict_single_image
 import torch
 
-CSV = r"data/final_training_manifest.csv"
+from project_root import str_path
+
+CSV = str_path('data', 'final_training_manifest.csv')
 df = pd.read_csv(CSV)
 # limit to 100 images (or fewer if dataset smaller)
 N = min(100, len(df))

@@ -1,0 +1,20 @@
+version: '3.8'
+services:
+  api:
+    build: ./webapp
+    image: surface-roughness-api
+    ports:
+      - "8000:8000"
+    command: uvicorn webapp.app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./results:/app/results
+      - ./data:/app/data
+
+  streamlit:
+    image: python:3.10-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8501:8501"
+    command: bash -c "pip install -r webapp/requirements.txt && streamlit run webapp/streamlit_app.py --server.port 8501 --server.address 0.0.0.0"

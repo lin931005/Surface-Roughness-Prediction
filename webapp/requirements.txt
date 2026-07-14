@@ -1,0 +1,15 @@
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
+torch
+torchvision
+Pillow
+python-multipart
+pyjwt
+psutil
+pandas
+openpyxl
+requests
+bcrypt
+python-dotenv
+
+# developer dependencies are moved to requirements-dev.txt

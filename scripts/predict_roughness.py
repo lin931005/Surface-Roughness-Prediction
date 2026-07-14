@@ -1,4 +1,5 @@
-﻿import os
+﻿import argparse
+import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import torch
@@ -8,8 +9,10 @@ import numpy as np
 import torchvision.models as models
 import torchvision.transforms as transforms
 
-BASE_DIR = r"C:\Users\tony9\Desktop\5000 - BETTER"
-MODEL_PATH = os.path.join(BASE_DIR, "results", "best_surface_model.pth")
+from project_root import path, str_path
+
+BASE_DIR = path()
+MODEL_PATH = str_path('results', 'best_surface_model.pth')
 IMG_SIZE = 224
 NORMALIZE = transforms.Normalize(
     mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
@@ -112,14 +115,21 @@ def predict_single_image(img_path, speed_rpm, condition_id, model=None, device=N
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Predict CNC surface roughness from one image')
+    parser.add_argument('--image', type=str, default=str_path('data', '5000-0', 'pc', '20260630164028698.jpg'),
+                        help='image file path to predict')
+    parser.add_argument('--speed', type=float, default=5000.0, help='spindle speed in RPM')
+    parser.add_argument('--cond', type=float, default=0.0, help='condition id')
+    args = parser.parse_args()
+
     print("[進度 3/4] 🔍 進入主執行區，準備讀取測試影像...")
     print("=" * 50)
     print("🚀 加工表面粗糙度 AI 預測系統 (ResNet-18 升級版) 🚀")
     print("=" * 50)
 
-    test_image = r"C:\Users\tony9\Desktop\5000 - BETTER\data\5000-0\pc\20260630164028698.jpg"
-    test_speed = 5000
-    test_cond = 0
+    test_image = args.image
+    test_speed = args.speed
+    test_cond = args.cond
 
     model = load_model(device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     prediction = predict_single_image(test_image, test_speed, test_cond, model=model)

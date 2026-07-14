@@ -2,6 +2,8 @@ import os
 import random
 import inspect
 import pandas as pd
+import argparse
+import json
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -23,12 +25,14 @@ PATIENCE = 5
 LR = 1e-4
 EPOCHS = 40
 
-BASE_DIR = r"C:\Users\tony9\Desktop\5000 - BETTER"
-CSV_PATH = os.path.join(BASE_DIR, "data", "final_training_manifest.csv")
-RESULTS_DIR = os.path.join(BASE_DIR, "results")
-BEST_MODEL_PATH = os.path.join(RESULTS_DIR, "best_surface_model.pth")
-CHECKPOINT_PATH = os.path.join(RESULTS_DIR, "best_surface_checkpoint.pth")
-LOSS_CSV_PATH = os.path.join(RESULTS_DIR, "loss_record.csv")
+from project_root import str_path
+
+BASE_DIR = str_path()
+CSV_PATH = str_path('data', 'final_training_manifest.csv')
+RESULTS_DIR = str_path('results')
+BEST_MODEL_PATH = str_path('results', 'best_surface_model.pth')
+CHECKPOINT_PATH = str_path('results', 'best_surface_checkpoint.pth')
+LOSS_CSV_PATH = str_path('results', 'loss_record.csv')
 
 # ImageNet normalization for ResNet pretrained backbone
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -143,6 +147,11 @@ def evaluate(model, dataloader, criterion, device):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', type=str, default=None, help='output model path')
+    parser.add_argument('--log', type=str, default=None, help='progress log path')
+    args = parser.parse_args()
+
     print("準備載入資料與模型...")
     set_seed(SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -235,6 +244,25 @@ def main():
             f"第 {epoch:02d}/{EPOCHS} 回合完成 | train_loss: {avg_train_loss:.4f} | val_loss: {avg_val_loss:.4f}"
         )
 
+        # write progress to log if provided
+        try:
+            log_dir = os.path.join(RESULTS_DIR, 'train_logs')
+            os.makedirs(log_dir, exist_ok=True)
+            if args.log:
+                log_path = args.log
+            else:
+                log_path = os.path.join(log_dir, f'train_progress_{int(time.time())}.jsonl')
+            entry = {
+                'epoch': epoch,
+                'train_loss': float(avg_train_loss),
+                'val_loss': float(avg_val_loss),
+                'timestamp': int(time.time())
+            }
+            with open(log_path, 'a', encoding='utf-8') as lf:
+                lf.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_without_improve = 0
@@ -249,6 +277,29 @@ def main():
                 },
                 CHECKPOINT_PATH,
             )
+            # if output path provided, also save full model and metadata
+            if args.output:
+                try:
+                    torch.save(model.state_dict(), args.output)
+                    # write metadata next to model
+                    try:
+                        meta = {
+                            'best_val_loss': float(best_val_loss),
+                            'epoch': int(epoch),
+                            'timestamp': int(time.time()),
+                            'params': {
+                                'batch_size': BATCH_SIZE,
+                                'lr': LR,
+                                'epochs': EPOCHS
+                            }
+                        }
+                        meta_path = args.output + '.meta.json'
+                        with open(meta_path, 'w', encoding='utf-8') as mf:
+                            json.dump(meta, mf, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             print(f"💾 已儲存最佳模型與檢查點：{BEST_MODEL_PATH}")
         else:
             epochs_without_improve += 1

@@ -1,4 +1,5 @@
 import os
+import sys
 import random
 import inspect
 import pandas as pd
@@ -25,7 +26,11 @@ PATIENCE = 5
 LR = 1e-4
 EPOCHS = 40
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from project_root import str_path
+
+
 
 BASE_DIR = str_path()
 CSV_PATH = str_path('data', 'final_training_manifest.csv')
@@ -155,7 +160,7 @@ def main():
     print("準備載入資料與模型...")
     set_seed(SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 目前使用的運算設備：{device}")
+    print(f"Device: {device}")
 
     if not os.path.exists(CSV_PATH):
         raise FileNotFoundError(f"找不到 CSV 檔案：{CSV_PATH}")
@@ -209,7 +214,7 @@ def main():
 
     torch.backends.cudnn.benchmark = True
 
-    print(f"開始進行 {EPOCHS} 回合的全局微調訓練！(Data Augmentation + AMP Enabled)\n" + "-" * 50)
+    print(f"開始進行 {EPOCHS} 回合的全局微調訓練！\n" + "-" * 50)
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
@@ -300,19 +305,19 @@ def main():
                         pass
                 except Exception:
                     pass
-            print(f"💾 已儲存最佳模型與檢查點：{BEST_MODEL_PATH}")
+            print(f"已儲存最佳模型與檢查點：{BEST_MODEL_PATH}")
         else:
             epochs_without_improve += 1
 
         if epochs_without_improve >= PATIENCE:
             print(
-                f"⏱️ 已連續 {PATIENCE} 個 epoch 未進步，提前停止訓練。"
+                f"已連續 {PATIENCE} 個 epoch 未進步，提前停止訓練。"
             )
             break
 
     loss_df = pd.DataFrame(stats)
     loss_df.to_csv(LOSS_CSV_PATH, index=False)
-    print(f"📊 Loss 歷史紀錄已儲存至：{LOSS_CSV_PATH}")
+    print(f"Loss 歷史紀錄已儲存至：{LOSS_CSV_PATH}")
     print("訓練完成！")
 
 

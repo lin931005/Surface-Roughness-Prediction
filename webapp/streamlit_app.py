@@ -1,170 +1,271 @@
 import streamlit as st
 import requests
+import pandas as pd
+import time
 from PIL import Image
 import io
 
-st.set_page_config(page_title='Surface Roughness', layout='centered')
+# ==========================================
+# 🌐 全域變數設定
+# ==========================================
+API_URL = "http://127.0.0.1:2578"
 
-st.title('Surface Roughness Prediction')
+# ==========================================
+# 🎨 網頁基礎與標題設定
+# ==========================================
+st.set_page_config(page_title='CNC 表面粗糙度預測系統', page_icon="⚙️", layout='centered')
 
-tab = st.sidebar.radio('Mode', ['User', 'Admin'])
+st.title('🚀 CNC 加工表面粗糙度 AI 預測系統')
+st.markdown("本系統採用 **ResNet-18 雙輸入深度學習架構**，為您提供高精準度的 Ra 值即時預測。")
 
-if tab == 'User':
-    uploaded = st.file_uploader('Upload image', type=['png','jpg','jpeg'])
+# 這裡就是剛才消失的 tab 定義！
+tab = st.sidebar.radio('切換操作模式', ['👨‍🔧 一般使用者 (現場檢測)', '👑 系統管理員'])
+
+# ==========================================
+# 👨‍🔧 模式 A：一般使用者 (現場檢測)
+# ==========================================
+if tab == '👨‍🔧 一般使用者 (現場檢測)':
+    st.info("💡 **操作說明**：請上傳工件照片。若輸入機台轉速將大幅提升預測精準度！")
+
+    # 簡化為單一輸入
+    has_params = st.checkbox("⚙️ 附加主軸轉速 (選填，啟用可提升預測準確度)")
+
+    if has_params:
+        speed_rpm = st.number_input("主軸轉速 (RPM)", min_value=1000, max_value=10000, value=5000, step=100)
+
+    st.markdown("---")
+    uploaded = st.file_uploader('📸 上傳表面影像 (支援 png, jpg, jpeg)', type=['png','jpg','jpeg'])
+
     if uploaded is not None:
         img = Image.open(uploaded).convert('RGB')
-        st.image(img, caption='input', use_column_width=True)
-        if st.button('Predict'):
+        st.image(img, caption='您上傳的待測影像', width='stretch')
+
+        use_gc = st.checkbox('顯示 AI 視覺熱力圖 (Grad-CAM)', value=True)
+
+        if st.button('🔮 開始 AI 預測', use_container_width=True):
             files = {'file': (uploaded.name, uploaded.getvalue(), 'image/jpeg')}
-            use_gc = st.checkbox('Return Grad-CAM heatmap', value=True)
             params = {}
             if use_gc:
                 params['gradcam'] = 'true'
-            try:
-                r = requests.post('http://localhost:8000/predict', files=files, params=params, timeout=30)
-                if r.status_code == 200:
-                    j = r.json()
-                    st.success(f"Predicted Ra: {j.get('ra')}")
-                    if j.get('heatmap'):
-                        st.image(j.get('heatmap'), caption='Grad-CAM', use_column_width=True)
-                    elif j.get('heatmap_error'):
-                        st.warning(j.get('heatmap_error'))
-                else:
-                    st.error(r.text)
-            except Exception as e:
-                st.error(str(e))
 
+            # 現在只需要傳送 speed 一個參數
+            if has_params:
+                params['speed'] = speed_rpm
+
+            with st.spinner('神經網路高速推論中...'):
+                try:
+                    r = requests.post(f'{API_URL}/predict', files=files, params=params, timeout=30)
+                    if r.status_code == 200:
+                        j = r.json()
+                        if 'error' in j:
+                            st.error(f"預測失敗：{j['error']}")
+                        else:
+                            st.success(f"### ✨ 預測表面粗糙度 (Ra): **{j.get('ra'):.4f} μm**")
+                            if j.get('used_default_params'):
+                                st.warning("⚠️ 本次預測採用【純視覺分析】(套用基準轉速)。若輸入實際轉速，預測將更精準喔！")
+                            else:
+                                st.info("🎯 本次預測採用【影像 + 轉速 雙通道高精度分析】")
+
+                            if j.get('heatmap'):
+                                st.image(j.get('heatmap'), caption='Grad-CAM 刀痕解析熱力圖', width='stretch')
+                            elif j.get('heatmap_error'):
+                                st.warning(f"熱力圖生成失敗：{j.get('heatmap_error')}")
+                    else:
+                        st.error(f"後端報錯 (代碼 {r.status_code})：{r.text}")
+                except Exception as e:
+                    st.error(f"系統連線失敗，請確認 FastAPI (Port 2578) 是否已啟動。錯誤：{str(e)}")
+
+# ==========================================
+# 👑 模式 B：系統管理員 (MLOps 專業中控台)
+# ==========================================
 else:
-    st.subheader('Admin')
+    import os
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+    st.subheader('👑 MLOps 系統管理員專業中控台')
+    st.markdown("提供模型重練、終端機監控、熱切換、數據分析與系統稽核功能。")
+
     if 'token' not in st.session_state:
         st.session_state['token'] = ''
-    username = st.text_input('Username', value='admin')
-    password = st.text_input('Password', type='password')
-    if st.button('Login'):
-        try:
-            r = requests.post('http://localhost:8000/login', params={'username': username, 'password': password})
-            if r.status_code == 200:
-                st.session_state['token'] = r.json().get('access_token')
-                st.success('Logged in')
-            else:
-                st.error('Login failed')
-        except Exception as e:
-            st.error(str(e))
+
+    with st.expander("🔑 系統管理員登入", expanded=not bool(st.session_state['token'])):
+        username = st.text_input('帳號 (Username)', value='admin')
+        password = st.text_input('密碼 (Password)', type='password')
+        if st.button('登入系統', use_container_width=True):
+            try:
+                r = requests.post(f'{API_URL}/login', params={'username': username, 'password': password})
+                if r.status_code == 200:
+                    st.session_state['token'] = r.json().get('access_token')
+                    st.success('登入成功！')
+                    st.rerun()
+                else:
+                    st.error('登入失敗，帳號或密碼錯誤。')
+            except Exception as e:
+                st.error(f"連線錯誤：{str(e)}")
+
     token = st.session_state.get('token','')
+
     if token:
-        st.success('Token set')
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button('Retrain model'):
-            if not token:
-                st.error('Need token')
-            else:
+        headers = {'Authorization': f'Bearer {token}'}
+
+        # 🌟 超強大五大分頁設計
+        tab_train, tab_model, tab_data, tab_history, tab_stats = st.tabs([
+            "🚀 訓練與終端機", "🤖 模型熱切換", "📊 資料集分析", "📜 預測紀錄與校正", "🖥️ 硬體監控"
+        ])
+
+        # ----------------------------------------------------
+        # 分頁 1：訓練與即時終端機
+        # ----------------------------------------------------
+        with tab_train:
+            st.markdown("#### 🚀 啟動自動化資料管線與訓練")
+            if st.button('🔥 一鍵重新掃描資料夾並訓練模型', use_container_width=True, type="primary"):
                 try:
-                    headers = {'Authorization': f'Bearer {token}'}
-                    r = requests.post('http://localhost:8000/retrain', headers=headers, timeout=5)
-                    st.write(r.json())
+                    r = requests.post(f'{API_URL}/retrain', headers=headers, timeout=5)
+                    st.success("已成功發送訓練指令！請在下方選擇最新生成的 Log 檔進行監聽。")
                 except Exception as e:
                     st.error(str(e))
-        if st.button('List models'):
-            try:
-                r = requests.get('http://localhost:8000/models')
-                st.json(r.json())
-            except Exception as e:
-                st.error(str(e))
-        if st.button('Dashboard'):
-            try:
-                headers = {'Authorization': f'Bearer {token}'} if token else {}
-                s = requests.get('http://localhost:8000/admin/stats', headers=headers)
-                ps = requests.get('http://localhost:8000/predictions/stats', headers=headers)
-                st.subheader('System Stats')
-                if s.status_code == 200:
-                    st.json(s.json())
-                st.subheader('Prediction Stats')
-                if ps.status_code == 200:
-                    data = ps.json()
-                    st.metric('Total predictions', data.get('total', 0))
-                    last = data.get('last', [])
-                    if last:
-                        import pandas as _pd
-                        df = _pd.DataFrame(last)
-                        if 'ra' in df.columns:
-                            df['ra'] = df['ra'].astype(float)
-                            st.line_chart(df['ra'])
-            except Exception as e:
-                st.error(str(e))
-    with col2:
-        uploaded_zip = st.file_uploader('Upload ZIP for batch predict', type=['zip'])
-        if uploaded_zip is not None and st.button('Run batch predict'):
-            try:
-                files = {'file': (uploaded_zip.name, uploaded_zip.getvalue(), 'application/zip')}
-                headers = {'Authorization': f'Bearer {token}'} if token else {}
-                r = requests.post('http://localhost:8000/predict_batch', files=files, headers=headers, timeout=120)
-                if r.status_code == 200:
-                    st.write(r.json())
-                else:
-                    st.error(r.text)
-            except Exception as e:
-                st.error(str(e))
 
-    st.markdown('---')
-    st.subheader('Train logs')
-    headers = {'Authorization': f'Bearer {token}'} if token else {}
-    try:
-        r = requests.get('http://localhost:8000/train_logs', headers=headers)
-        logs = r.json().get('logs', [])
-    except Exception:
-        logs = []
-
-    sel = st.selectbox('Select log', [''] + logs)
-    if sel:
-        col_a, col_b = st.columns([3,1])
-        with col_b:
-            if 'monitor' not in st.session_state:
-                st.session_state['monitor'] = ''
-            if st.session_state['monitor'] == sel:
-                if st.button('Stop monitoring'):
-                    st.session_state['monitor'] = ''
-            else:
-                if st.button('Start monitoring'):
-                    st.session_state['monitor'] = sel
-        # function to fetch progress
-        def fetch_progress(name):
+            st.markdown("---")
             try:
-                r = requests.get(f'http://localhost:8000/train_progress/{name}', headers=headers, timeout=5)
-                if r.status_code == 200:
-                    return r.json().get('progress', [])
+                r = requests.get(f'{API_URL}/train_logs', headers=headers)
+                logs = r.json().get('logs', [])
             except Exception:
-                return []
-            return []
+                logs = []
 
-        placeholder = st.empty()
-        chart = None
-        # initial fetch
-        progress = fetch_progress(sel)
-        if progress:
-            import pandas as _pd
-            df = _pd.DataFrame(progress)
-            df = df.set_index('epoch')
-            placeholder.line_chart(df[['train_loss','val_loss']])
+            sel = st.selectbox('📡 選擇要監聽的訓練日誌 (Log)', [''] + logs)
 
-        # live monitoring loop (short polling)
-        import time as _time
-        while st.session_state.get('monitor','') == sel:
-            progress = fetch_progress(sel)
-            if progress:
-                import pandas as _pd
-                df = _pd.DataFrame(progress)
-                df = df.set_index('epoch')
-                placeholder.line_chart(df[['train_loss','val_loss']])
-            _time.sleep(2)
+            if sel:
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.session_state.get('monitor') != sel:
+                        if st.button('▶️ 啟動即時監聽', use_container_width=True):
+                            st.session_state['monitor'] = sel
+                            st.rerun()
+                with col_btn2:
+                    if st.session_state.get('monitor') == sel:
+                        if st.button('🛑 停止監聽', use_container_width=True):
+                            st.session_state['monitor'] = ''
+                            st.rerun()
 
-    st.subheader('Report true Ra (Human-in-the-Loop)')
-    fname = st.text_input('Filename')
-    true_ra = st.number_input('True Ra', value=0.0, format='%.6f')
-    if st.button('Submit true Ra'):
-        try:
-            headers = {'Authorization': f'Bearer {token}'} if token else {}
-            r = requests.post('http://localhost:8000/report_true', params={'filename': fname, 'ra': float(true_ra)}, headers=headers)
-            st.write(r.json())
-        except Exception as e:
-            st.error(str(e))
+                if st.session_state.get('monitor') == sel:
+                    col_chart, col_term = st.columns([1, 1])
+                    chart_placeholder = col_chart.empty()
+                    term_placeholder = col_term.empty()
+
+                    while st.session_state.get('monitor') == sel:
+                        try:
+                            r_prog = requests.get(f'{API_URL}/train_progress/{sel}', headers=headers, timeout=3)
+                            progress = r_prog.json().get('progress', []) if r_prog.status_code == 200 else []
+                            if progress:
+                                df = pd.DataFrame(progress).set_index('epoch')
+                                chart_placeholder.line_chart(df[['train_loss','val_loss']])
+                        except: pass
+
+                        try:
+                            r_text = requests.get(f'{API_URL}/train_logs/{sel}', headers=headers, timeout=3)
+                            if r_text.status_code == 200:
+                                log_text = r_text.json().get('log', '')
+                                lines = log_text.split('\n')
+                                tail_text = '\n'.join(lines[-25:]) # 顯示最後 25 行
+                                term_placeholder.code(tail_text, language='bash')
+                        except: pass
+                        time.sleep(2)
+
+        # ----------------------------------------------------
+        # 分頁 2：模型熱切換
+        # ----------------------------------------------------
+        with tab_model:
+            st.markdown("#### 🔄 模型版本控制 (Rollback)")
+            st.info("若新模型表現不佳，您可以在此一鍵退版。新的命名規則為：`model_YYYYMMDD_HHMMSS.pth`")
+
+            try:
+                r_models = requests.get(f'{API_URL}/models')
+                if r_models.status_code == 200:
+                    model_list = [m['file'] for m in r_models.json().get('models', [])]
+
+                    if model_list:
+                        selected_model = st.selectbox("選擇要載入的歷史模型檔案", model_list)
+                        if st.button("🌟 設為上線模型 (Deploy)", type="primary"):
+                            with st.spinner("正在將模型載入 GPU 記憶體..."):
+                                res = requests.post(f'{API_URL}/admin/set_active_model', params={'model_file': selected_model}, headers=headers)
+                                if res.status_code == 200:
+                                    st.success(res.json().get('msg'))
+                                else:
+                                    st.error(res.json().get('error'))
+                    else:
+                        st.warning("目前還沒有歷史模型。")
+            except Exception as e:
+                st.error(f"獲取模型清單失敗: {e}")
+
+        # ----------------------------------------------------
+        # 分頁 3：資料集分析 (新增功能)
+        # ----------------------------------------------------
+        with tab_data:
+            st.markdown("#### 📊 當前訓練資料集分佈")
+            csv_path = os.path.join(BASE_DIR, 'data', 'final_training_manifest.csv')
+            if os.path.exists(csv_path):
+                df_data = pd.read_csv(csv_path)
+                st.success(f"目前資料庫中共有 **{len(df_data)}** 張有效訓練影像。")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**不同主軸轉速 (Speed) 的資料量**")
+                    st.bar_chart(df_data['speed'].value_counts())
+                with col2:
+                    st.markdown("**原始資料預覽 (前 5 筆)**")
+                    st.dataframe(df_data.head())
+            else:
+                st.warning("尚未生成訓練清單 (final_training_manifest.csv)")
+
+        # ----------------------------------------------------
+        # 分頁 4：預測紀錄與校正 (新增功能)
+        # ----------------------------------------------------
+        with tab_history:
+            st.markdown("#### 📜 歷史預測稽核日誌")
+            pred_path = os.path.join(BASE_DIR, 'results', 'predictions.csv')
+            if os.path.exists(pred_path):
+                df_pred = pd.read_csv(pred_path)
+                # 將 timestamp 轉換成可讀時間
+                df_pred['timestamp'] = pd.to_datetime(df_pred['timestamp'], unit='s')
+                df_pred = df_pred.sort_values('timestamp', ascending=False).reset_index(drop=True)
+
+                st.dataframe(df_pred, use_container_width=True)
+
+                csv = df_pred.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(label="📥 匯出預測紀錄 (CSV)", data=csv, file_name='ai_predictions_log.csv', mime='text/csv')
+            else:
+                st.info("目前還沒有任何預測紀錄。")
+
+            st.markdown("---")
+            st.markdown("#### 🛠️ 人工預測校正 (Human-in-the-Loop)")
+            st.info("若現場品管發現 AI 預測誤差過大，請在此輸入檔案名稱與真實量測值，未來重練時將自動納入優化。")
+
+            col_a, col_b = st.columns(2)
+            with col_a: fname = st.text_input('異常預測之影像檔名 (例如: upload_12345)')
+            with col_b: true_ra = st.number_input('儀器真實量測 Ra 值', value=0.0, format='%.6f')
+
+            if st.button('📤 提交校正數據'):
+                try:
+                    r = requests.post(f'{API_URL}/report_true', params={'filename': fname, 'ra': float(true_ra)}, headers=headers)
+                    st.success("數據已記錄至後端標註資料庫！")
+                except Exception as e:
+                    st.error(str(e))
+
+        # ----------------------------------------------------
+        # 分頁 5：硬體監控
+        # ----------------------------------------------------
+        with tab_stats:
+            st.markdown("#### 🖥️ 伺服器即時狀態")
+            if st.button('🔄 重新整理狀態', type="primary"):
+                try:
+                    s = requests.get(f'{API_URL}/admin/stats', headers=headers)
+                    if s.status_code == 200:
+                        stats = s.json()
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("CPU 使用率", f"{stats['cpu']} %")
+                        col2.metric("記憶體使用率", f"{stats['mem']['percent']} %")
+                        col3.metric("GPU 狀態", "✅ 啟動" if stats['gpu']['available'] else "❌ 未偵測到")
+                except Exception as e:
+                    st.error(str(e))
+    else:
+        st.warning("⚠️ 請先於上方登入系統，以解鎖完整 MLOps 功能。")

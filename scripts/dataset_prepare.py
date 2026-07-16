@@ -1,90 +1,72 @@
 import os
 import glob
 import pandas as pd
-import cv2
-import numpy as np
+import sys
 
+# 確保能讀取到上一層的 project_root
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from project_root import str_path
 
-# 1. 設定你的基本路徑
-BASE_DIR = str_path('data')
-CSV_PATH = os.path.join(BASE_DIR, "label_data.csv") # 你在步驟一存好的 CSV
+def generate_manifest():
+    BASE_DIR = str_path('data')
+    CSV_PATH = os.path.join(BASE_DIR, "final_training_manifest.csv")
 
-# 2. 建立一個虛擬的對應字典 (如果你的 CSV 還沒做好，程式會先用這個示範數值跑跑看)
-# 這裡對應的是你每個資料夾的真實 Ra 量測值
-ra_lookup = {
-    "5000-0": 1.354,
-    "5000-1": 1.582,
-    "5000-2": 2.624,
-    "5000-3": 2.345,
-    "7000-0": 3.037,
-    "7000-1": 2.650
-}
+    # 這裡存放真實的 Ra 量測值
+    ra_lookup = {
+        "5000-0": 1.354,
+        "5000-1": 1.582,
+        "5000-2": 2.624,
+        "5000-3": 2.345,
+        "7000-0": 3.037,
+        "7000-1": 2.650,
+    }
 
-print("開始掃描資料夾並進行資料配對...")
+    # 移除了表情符號，避免 cp950 編碼錯誤
+    print("開始動態掃描資料夾並生成最新 CSV...")
+    all_data_rows = []
 
-all_data_rows = []
+    if not os.path.exists(BASE_DIR):
+        print(f"找不到 data 資料夾：{BASE_DIR}")
+        return
 
-# 3. 定義你要掃描的加工資料夾清單
-folder_names = ["5000-0", "5000-1", "5000-2", "5000-3", "7000-0", "7000-1"]
+    # 自動掃描 data 資料夾底下的所有東西
+    for folder_name in os.listdir(BASE_DIR):
+        folder_path = os.path.join(BASE_DIR, folder_name)
 
-for folder in folder_names:
-    folder_path = os.path.join(BASE_DIR, folder)
-    
-    # 因為你的資料夾裡，有的是放在 'pc'，有的是放在 '照片'，這裡做一個自動相容判斷
-    img_dir = os.path.join(folder_path, "pc")
-    if not os.path.exists(img_dir):
-        img_dir = os.path.join(folder_path, "照片")
-        
-    # 如果找到了存放圖片的子資料夾，就開始抓裡面的所有 .jpg 檔
-    if os.path.exists(img_dir):
-        search_path = os.path.join(img_dir, "*.jpg")
-        image_files = glob.glob(search_path)
-        print(f"資料夾 [{folder}] 找到 {len(image_files)} 張切削表面圖片")
-        
-        # 解析轉速與進給編號 (從資料夾名稱切開，例如 '5000-0' 切成 '5000' 和 '0')
-        speed, cond_id = folder.split('-')
-        
-        # 抓取對應的 Ra 標籤值
-        ra_value = ra_lookup.get(folder, 0.0)
-        
-        # 把每一張圖片的路徑、加工參數、Ra值全部綁在一起
-        for img_path in image_files:
-            all_data_rows.append({
-                "image_path": img_path,
-                "speed": float(speed),
-                "condition_id": float(cond_id),
-                "ra_target": float(ra_value)
-            })
-    else:
-        print(f"警告：找不到資料夾 {folder} 的圖片目錄(pc或照片)")
+        # 只處理名稱裡面有 '-' 的資料夾
+        if not os.path.isdir(folder_path) or '-' not in folder_name:
+            continue
 
-# 4. 將所有人腦看得到的配對結果，轉換成機器學習專用的清單表格 (DataFrame)
-dataset_df = pd.DataFrame(all_data_rows)
+        try:
+            speed, cond_id = folder_name.split('-')
+        except ValueError:
+            continue
 
-print("\n--- 資料集配對完成 ---")
-print(f"總共成功配對了 {len(dataset_df)} 筆資料（圖片+參數+Ra值）")
-print("前 5 筆資料預覽：")
-print(dataset_df.head())
+        # 支援 'pc' 或 '照片' 兩種命名
+        img_dir = os.path.join(folder_path, "pc")
+        if not os.path.exists(img_dir):
+            img_dir = os.path.join(folder_path, "照片")
 
-# 5. 將這個配對好的清單儲存起來，後面訓練模型直接讀這張表就可以了
-dataset_df.to_csv(os.path.join(BASE_DIR, "final_training_manifest.csv"), index=False, encoding="utf-8-sig")
-print("\n配對清單已儲存至：final_training_manifest.csv")
+        if os.path.exists(img_dir):
+            search_path = os.path.join(img_dir, "*.jpg")
+            image_files = glob.glob(search_path)
 
+            ra_value = ra_lookup.get(folder_name, 0.0)
 
-# ==========================================
-# 補充教學：如何用這張表把圖片真正讀進 Python 變矩陣？
-# ==========================================
-def load_and_preprocess_image(img_path):
-    # 讀取圖片 (OpenCV 預設是 BGR)
-    img = cv2.imread(img_path)
-    # 將圖片縮放到統一尺寸 (224x224)，這是神經網路最喜歡的大小
-    img_resized = cv2.resize(img, (224, 224))
-    # 將像素值從 0~255 正規化到 0~1 之間
-    img_normalized = img_resized.astype(np.float32) / 255.0
-    return img_normalized
+            for img_path in image_files:
+                all_data_rows.append({
+                    "image_path": img_path,  # 自動抓取當前電腦的絕對路徑
+                    "speed": float(speed),
+                    "condition_id": float(cond_id),
+                    "ra_target": float(ra_value)
+                })
 
-print("\n測試讀取第一張圖片進行前處理...")
-if len(all_data_rows) > 0:
-    test_img = load_and_preprocess_image(all_data_rows[0]["image_path"])
-    print(f"測試成功！圖片已被轉換為形狀為 {test_img.shape} 的數值矩陣，可以準備餵給 AI 了。")
+    dataset_df = pd.DataFrame(all_data_rows)
+    dataset_df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
+
+    # 移除了表情符號
+    print(f"CSV 自動生成完畢！共包含 {len(dataset_df)} 張圖片。")
+    print(f"檔案已儲存至: {CSV_PATH}")
+
+if __name__ == '__main__':
+    generate_manifest()

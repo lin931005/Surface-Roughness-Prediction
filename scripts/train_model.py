@@ -19,12 +19,16 @@ from PIL import Image
 # 參數設定
 # ------------------------------------------
 SEED = 42
-BATCH_SIZE = 16
-NUM_WORKERS = min(4, os.cpu_count() or 1)
+# 猛獸級 Batch Size：讓 GPU 一次平行處理更多圖片，大幅穩定梯度下降方向
+BATCH_SIZE = 64  # 如果你的 5070 Ti VRAM 很大，甚至可以開到 128
+# 多核心數據搬運工：解除 CPU 限制，確保 GPU 不會發呆等資料
+NUM_WORKERS = min(8, os.cpu_count() or 4)
 VALIDATION_SPLIT = 0.2
-PATIENCE = 5
+# 給予極大的耐心：因為資料多且模型複雜，需要更多時間慢慢收斂
+PATIENCE = 40
 LR = 1e-4
-EPOCHS = 40
+# 深度學習馬拉松：有時間就讓它跑滿，AI 會自己提早結束
+EPOCHS = 200
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -51,11 +55,17 @@ class SurfaceDataset(Dataset):
         self.data_info = data_frame.reset_index(drop=True)
         self.is_train = is_train
 
+        # 針對金屬表面紋理強化的擴增策略
         self.train_transform = transforms.Compose([
-            transforms.Resize((224, 224)),
+            # 1. 隨機縮放並裁切：模擬顯微鏡在不同區域、不同倍率的觀察 (這是增加資料量的大絕招)
+            transforms.RandomResizedCrop(224, scale=(0.5, 1.0), ratio=(0.9, 1.1)),
+            # 2. 隨機水平/垂直翻轉：加工紋理上下左右翻轉後，Ra 值物理意義不變
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            # 3. 隨機旋轉：小角度旋轉模擬放置工件時的微小偏移 (-15度 到 15度)
+            transforms.RandomRotation(degrees=15),
+            # 4. 色彩擾動：模擬顯微鏡光源明暗不均的問題
+            transforms.ColorJitter(brightness=0.3, contrast=0.3),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ])
@@ -100,7 +110,8 @@ class SurfaceDataset(Dataset):
 class ResNetDualInputModel(nn.Module):
     def __init__(self):
         super(ResNetDualInputModel, self).__init__()
-        self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        # 升級為擁有 50 層深度特徵萃取能力的 ResNet-50 大腦
+        self.resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
 
         num_ftrs = self.resnet.fc.in_features
         self.resnet.fc = nn.Sequential(
@@ -144,7 +155,7 @@ def evaluate(model, dataloader, criterion, device):
             imgs = imgs.to(device)
             params = params.to(device)
             targets = targets.to(device)
-            with torch.cuda.amp.autocast(enabled=device.type == 'cuda'):
+            with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
                 preds = model(imgs, params)
                 loss = criterion(preds, targets)
             total_loss += loss.item()
@@ -206,7 +217,7 @@ def main():
     if 'verbose' in inspect.signature(optim.lr_scheduler.ReduceLROnPlateau).parameters:
         scheduler_kwargs['verbose'] = True
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, **scheduler_kwargs)
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
+    scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
     best_val_loss = float('inf')
     epochs_without_improve = 0
@@ -226,7 +237,7 @@ def main():
             batch_targets = batch_targets.to(device)
 
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=(device.type == 'cuda')):
+            with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
                 predictions = model(batch_imgs, batch_params)
                 loss = criterion(predictions, batch_targets)
 

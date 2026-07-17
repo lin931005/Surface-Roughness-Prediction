@@ -16,7 +16,7 @@ API_URL = "http://127.0.0.1:2578"
 st.set_page_config(page_title='CNC 表面粗糙度預測系統', page_icon="⚙️", layout='centered')
 
 st.title('🚀 CNC 加工表面粗糙度 AI 預測系統')
-st.markdown("本系統採用 **ResNet-18 雙輸入深度學習架構**，為您提供高精準度的 Ra 值即時預測。")
+st.markdown("本系統採用 **ResNet-50 雙輸入深度學習架構**，為您提供高精準度的 Ra 值即時預測。")
 
 # 這裡就是剛才消失的 tab 定義！
 tab = st.sidebar.radio('切換操作模式', ['👨‍🔧 一般使用者 (現場檢測)', '👑 系統管理員'])

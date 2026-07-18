@@ -15,6 +15,9 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from PIL import Image
 
+import functools
+print = functools.partial(print, flush=True)
+
 # ------------------------------------------
 # 參數設定
 # ------------------------------------------

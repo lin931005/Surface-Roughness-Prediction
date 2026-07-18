@@ -18,6 +18,7 @@ import psutil
 import base64
 import numpy as np
 import matplotlib
+import random
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
@@ -41,7 +42,7 @@ MODEL_PATH = ACTIVE_MODEL_LINK if os.path.exists(ACTIVE_MODEL_LINK) else os.path
 class ResNetDualInputModel(nn.Module):
     def __init__(self):
         super(ResNetDualInputModel, self).__init__()
-        self.resnet = models.resnet18(weights=None)
+        self.resnet = models.resnet50(weights=None)
 
         num_ftrs = self.resnet.fc.in_features
         self.resnet.fc = nn.Sequential(
@@ -71,7 +72,7 @@ def load_model():
     if model is None:
         if os.path.exists(MODEL_PATH):
             try:
-                print("▶️ 正在建立雙輸入 ResNet-18 骨架...")
+                print("▶️ 正在建立雙輸入 ResNet-50 骨架...")
                 model = ResNetDualInputModel()
 
                 print("▶️ 正在載入模型權重...")
@@ -100,7 +101,7 @@ transform = T.Compose([
 ])
 
 # ==========================================
-# 🚀 3. 預測核心 API (支援選填參數)
+# 🚀 3. 預測核心 API (九宮格強化版)
 # ==========================================
 @app.post("/predict")
 async def predict(
@@ -117,7 +118,8 @@ async def predict(
     if model is None:
         return JSONResponse({"error": "model not loaded"}, status_code=500)
 
-    x = transform(img).unsqueeze(0)
+    # 偵測目前模型在哪個設備運作 (自動相容 CPU 與 CUDA)
+    device = next(model.parameters()).device
 
     # 處理「選填」的機台參數
     used_default = False
@@ -125,38 +127,76 @@ async def predict(
         speed = 5000.0  # 如果沒填，給予一個預設平均轉速
         used_default = True
 
-    # 💡 核心工程技巧：
-    # 雖然前端不傳切削條件了，但 PyTorch 雙輸入模型當初訓練時是吃 2 個維度。
-    # 所以我們在這裡手動補上一個「0.0」作為 dummy 參數，避免維度錯誤崩潰。
+    # 手動補上 dummy_condition 避免模型維度錯誤
     dummy_condition = 0.0
-    params_tensor = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]], dtype=torch.float32)
 
-    x = x.requires_grad_(True)
-    out = model(x, params_tensor)
+    # ==========================================
+    # 🌟 核心升級：蒙地卡羅隨機取樣與極端值過濾 (TTA)
+    # ==========================================
 
-    if isinstance(out, torch.Tensor):
-        try:
-            val = float(out.item())
-        except Exception:
-            val = float(out.detach().cpu().numpy().tolist())
-    else:
-        val = float(out)
+    
+    # 1. 影像轉 Numpy 陣列並設定取樣參數
+    img_np = np.array(img)
+    h, w, _ = img_np.shape
+    
+    # 定義每次預測要「隨機抽幾塊」以及「每塊的大小」
+    num_patches = 16 
+    crop_h, crop_w = h // 2, w // 2  # 每次隨機擷取 1/4 面積的局部特徵
+    
+    # 2. 隨機撒網擷取小圖 (無限種可能)
+    patches = []
+    for _ in range(num_patches):
+        # 隨機決定裁切的左上角座標
+        top = random.randint(0, h - crop_h)
+        left = random.randint(0, w - crop_w)
+        
+        patch_arr = img_np[top:top+crop_h, left:left+crop_w]
+        patches.append(Image.fromarray(patch_arr))
+
+    # 3. 將這 16 張隨機小圖打包送入設備
+    batch_tensors = torch.stack([transform(p) for p in patches]).to(device)
+
+    # 4. 複製 16 份轉速參數
+    params_tensor = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]] * num_patches, dtype=torch.float32).to(device)
+
+    # 5. 讓 RTX 5070 Ti 一次平行算完 16 個隨機區塊
+    model.eval()
+    with torch.no_grad():
+        preds = model(batch_tensors, params_tensor).cpu().numpy().flatten()
+
+    # 6. 🛡️ 進階數據清洗：動態修剪平均值
+    preds_sorted = np.sort(preds)
+    # 踢除最高 15% 與最低 15% 的極端值 (徹底無視灰塵與刮痕)
+    trim_count = int(num_patches * 0.15) 
+    valid_preds = preds_sorted[trim_count:-trim_count]
+    
+    final_ra = float(np.mean(valid_preds))
+    # ==========================================
 
     result = {
-        "ra": val,
-        "used_default_params": used_default
+        "ra": final_ra,
+        "used_default_params": used_default,
+        "raw_9_patches_ra": preds.tolist() # 附上原始 9 宮格數據供開發除錯
     }
 
+    # ==========================================
+    # 🎨 保持 Grad-CAM 視覺化支援 (使用整張全圖)
+    # ==========================================
     if gradcam:
         try:
-            heatmap_b64 = compute_gradcam(model, x, params_tensor, img)
+            # 針對 Grad-CAM 依然使用完整的圖片進行全域熱力圖分析
+            x_whole = transform(img).unsqueeze(0).to(device)
+            x_whole.requires_grad_(True)
+            params_whole = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]], dtype=torch.float32).to(device)
+
+            heatmap_b64 = compute_gradcam(model, x_whole, params_whole, img)
             result['heatmap'] = heatmap_b64
         except Exception as e:
             result['heatmap_error'] = str(e)
 
     try:
         fn = getattr(file, 'filename', f'upload_{int(time.time())}')
-        log_prediction(fn, float(val))
+        log_prediction(fn, final_ra)
     except Exception:
         pass
 
@@ -191,7 +231,8 @@ def compute_gradcam(model, input_tensor, params_tensor, orig_img, target_layer=N
         gradients = grad_out[0].detach()
 
     fh = target_layer.register_forward_hook(forward_hook)
-    bh = target_layer.register_backward_hook(backward_hook)
+    # 💡 加上 _full_ 以符合 PyTorch 最新規範，消除警告
+    bh = target_layer.register_full_backward_hook(backward_hook)
 
     # 必須同時傳入影像與參數
     output = model(input_tensor, params_tensor)

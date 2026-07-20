@@ -13,6 +13,7 @@ import os
 import subprocess
 import zipfile
 import time
+import cv2
 import pandas as pd
 import psutil
 import base64
@@ -136,19 +137,19 @@ async def predict(
 
 
     # 1. 影像轉 Numpy 陣列並設定取樣參數
+    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
     img_np = np.array(img)
     h, w, _ = img_np.shape
 
     num_patches = 32
-    crop_h, crop_w = h // 2, w // 2
+    crop_h, crop_w = int(h * 0.8), int(w * 0.8)
 
     patches = []
-    patch_coords = [] # 💡 新增：用來記錄每個取樣框的座標
+    patch_coords = []
     for _ in range(num_patches):
         top = random.randint(0, h - crop_h)
         left = random.randint(0, w - crop_w)
 
-        # 記錄座標資訊
         patch_coords.append({
             "top": top,
             "left": left,
@@ -160,27 +161,37 @@ async def predict(
         patches.append(Image.fromarray(patch_arr))
 
     batch_tensors = torch.stack([transform(p) for p in patches]).to(device)
-
     params_tensor = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]] * num_patches, dtype=torch.float32).to(device)
 
     model.eval()
     with torch.no_grad():
         preds = model(batch_tensors, params_tensor).cpu().numpy().flatten()
 
-    # 將預測結果與座標綁定，方便後續排序追蹤
+    # ==========================================
+    # 🚨 修正 2：真正能擋住橘貓的 OOD 異常影像偵測 (HSV 飽和度分析)
+    # ==========================================
+    # 將圖片轉換為 HSV 色彩空間 (Hue, Saturation, Value)
+    img_hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
+
+    # 取出 S (Saturation 飽和度) 通道並計算整張圖的平均飽和度
+    mean_saturation = float(np.mean(img_hsv[:, :, 1]))
+
+    # 設定飽和度門檻，大於 30 就視為非工業金屬的彩色異常圖片
+    is_anomaly = bool(mean_saturation > 60)
+
+    # 我們將這個飽和度數值傳給前端，這樣觸發警告時你就能看到貓咪的飽和度有多高
+    color_variance = mean_saturation
+    # ==========================================
+
     preds_with_coords = list(zip(preds, patch_coords))
-    # 依照 Ra 值排序
     preds_sorted_with_coords = sorted(preds_with_coords, key=lambda x: x[0])
 
-    # 提取排序後的預測值
     preds_sorted = [x[0] for x in preds_sorted_with_coords]
-
     trim_count = int(num_patches * 0.15)
     valid_preds = preds_sorted[trim_count:-trim_count] if trim_count > 0 else preds_sorted
 
     final_ra = float(np.mean(valid_preds))
 
-    # 整理帶有座標的詳細結果
     detailed_patches = []
     for i, (val, coords) in enumerate(preds_sorted_with_coords):
         if i < trim_count:
@@ -197,15 +208,15 @@ async def predict(
             "coords": coords
         })
 
-    # ==========================================
-
     result = {
         "ra": final_ra,
         "used_default_params": used_default,
+        "is_anomaly": is_anomaly,      # 💡 是否為異常圖片
+        "preds_std": color_variance,   # 💡 偷偷把這裡換成色彩變異數傳給前端顯示
         "xai_details": {
             "num_patches": num_patches,
             "trim_count": trim_count,
-            "patches_info": detailed_patches # 💡 回傳包含座標的詳細資訊
+            "patches_info": detailed_patches
         }
     }
     #=======================================

@@ -4,6 +4,8 @@ import pandas as pd
 import time
 from PIL import Image, ImageDraw, ImageFont # 💡 引入 ImageDraw 和 ImageFont
 import io
+import os
+import random
 import altair as alt
 
 # ==========================================
@@ -43,14 +45,39 @@ if tab == '👨‍🔧 一般使用者 (現場檢測)':
 
         use_gc = st.checkbox('顯示 AI 視覺熱力圖 (Grad-CAM)', value=True)
 
-        if st.button('🔮 開始 AI 預測', use_container_width=True):
-            # 💡 必須把這段加回來，不然 requests 找不到東西傳送！
+        # ==========================================
+        # 🧠 新增：狀態記憶區 (為了解決按鈕重置與強制執行)
+        # ==========================================
+        if 'force_override' not in st.session_state:
+            st.session_state['force_override'] = False
+        if 'do_predict' not in st.session_state:
+            st.session_state['do_predict'] = False
+
+        # 當換一張新圖片時，重置所有狀態
+        if 'last_file' not in st.session_state or st.session_state['last_file'] != uploaded.name:
+            st.session_state['last_file'] = uploaded.name
+            st.session_state['force_override'] = False
+            st.session_state['do_predict'] = False
+
+        # 💡 定義回呼函式，確保按鈕按下的瞬間能優先改變狀態 (破解重啟陷阱)
+        def trigger_override():
+            st.session_state['force_override'] = True
+            st.session_state['do_predict'] = True
+
+        # 🐾 新增：專門用來「洗牌換圖」的函式
+        def trigger_next_meme():
+            st.session_state['do_predict'] = True
+
+        predict_btn = st.button('🔮 開始 AI 預測', use_container_width=True)
+
+        # 只要按下預測，或是被標記為「準備重新預測 (do_predict)」，就啟動連線
+        if predict_btn or st.session_state['do_predict']:
+            st.session_state['do_predict'] = False # 執行後馬上重置防呆
+
             files = {'file': (uploaded.name, uploaded.getvalue(), 'image/jpeg')}
             params = {}
             if use_gc:
                 params['gradcam'] = 'true'
-
-            # 確保轉速參數有被正確送出
             if has_params:
                 params['speed'] = speed_rpm
 
@@ -62,7 +89,59 @@ if tab == '👨‍🔧 一般使用者 (現場檢測)':
                         if 'error' in j:
                             st.error(f"預測失敗：{j['error']}")
                         else:
+                            # 🚨 攔截異常圖片與彩蛋按鈕
+                            if j.get('is_anomaly'):
+                                # 如果還沒有開啟強制覆寫權限
+                                if not st.session_state['force_override']:
+                                    st.error(f"🚨 **異常影像警告：拒絕執行分析**")
+                                    # 💡 把消失的 HSV 數值加回來了！
+                                    st.warning(f"系統偵測到此圖片缺乏均勻的金屬切削紋理 (HSV 飽和度高達 {j.get('preds_std'):.2f})！這顯然不是一張標準的顯微鏡工件照片。")
+
+                                    meme_folder = os.path.join("data", "Utfg2026")
+
+                                    if os.path.exists(meme_folder):
+                                        valid_exts = ('.png', '.jpg', '.jpeg')
+                                        all_images = [f for f in os.listdir(meme_folder) if f.lower().endswith(valid_exts)]
+
+                                        if all_images:
+                                            # ==========================================
+                                            # 🃏 半隨機洗牌清單機制 (Shuffler)
+                                            # ==========================================
+                                            # 如果 session 裡沒有洗牌清單，或是清單已經播完了，就重新洗牌！
+                                            if 'meme_playlist' not in st.session_state or not st.session_state['meme_playlist']:
+                                                shuffled_list = all_images.copy()
+                                                random.shuffle(shuffled_list)  # 隨機打亂順序
+                                                st.session_state['meme_playlist'] = shuffled_list
+
+                                            # 依序從洗牌清單中拿出一張圖片 (pop 掉代表拿出來展示)
+                                            current_meme = st.session_state['meme_playlist'].pop(0)
+                                            random_img_path = os.path.join(meme_folder, current_meme)
+                                            # ==========================================
+
+                                            st.image(random_img_path)
+                                            st.markdown("<h4 style='text-align: center; color: #ff4b4b;'>您的照片似乎不符合標準，請參考這些照片(並沒有)</h4>", unsafe_allow_html=True)
+
+                                            st.button("🔄 換一張參考照片", on_click=trigger_next_meme)
+                                        else:
+                                            st.image("https://http.cat/406", caption="Not Acceptable (毛毛照片不見啦！)")
+                                    else:
+                                        st.image("https://http.cat/406", caption="找不到 Utfg2026 資料夾，只好繼續派貓咪上場")
+
+
+                                    # 💡 你的彩蛋：使用 on_click 呼叫回呼函式
+                                    st.button("真的是切削照片嗎?", on_click=trigger_override)
+
+                                    st.stop() # 阻擋後續報表生成
+                                else:
+                                    # 如果已經被強制突破
+                                    st.success("好吧 我相信你... 系統已解除防禦，強制執行粗糙度檢測。")
+
+                            # ======= 下面是原本正常的流程 =======
                             st.success(f"### ✨ 預測表面粗糙度 (Ra): **{j.get('ra'):.4f} μm**")
+
+                            st.info(f"📊 **參數監控面板**：本影像之平均 HSV 飽和度為 **{j.get('preds_std'):.2f}** ")
+
+                            # (後續熱力圖與 XAI 的程式碼保持原樣...)
                             if j.get('used_default_params'):
                                 st.warning("⚠️ 本次預測採用【純視覺分析】(套用基準轉速)。若輸入實際轉速，預測將更精準喔！")
                             else:

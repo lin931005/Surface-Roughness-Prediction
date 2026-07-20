@@ -80,10 +80,15 @@ class SurfaceDataset(Dataset):
         ])
 
     def __len__(self):
+        if self.is_train:
+            return len(self.data_info) * 2
         return len(self.data_info)
 
     def __getitem__(self, idx):
-        row = self.data_info.iloc[idx]
+        # 假設原本有 220 張圖，當 idx 是 221 時，會自動去讀取第 1 張圖 (221 % 220 = 1)
+        # 搭配前面的 RandomResizedCrop，AI 就會看到同一張圖的「另一種隨機裁切視角」
+        real_idx = idx % len(self.data_info)
+        row = self.data_info.iloc[real_idx]
         img_path = row['image_path']
 
         try:

@@ -2,8 +2,9 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont # 💡 引入 ImageDraw 和 ImageFont
 import io
+import altair as alt
 
 # ==========================================
 # 🌐 全域變數設定
@@ -43,12 +44,13 @@ if tab == '👨‍🔧 一般使用者 (現場檢測)':
         use_gc = st.checkbox('顯示 AI 視覺熱力圖 (Grad-CAM)', value=True)
 
         if st.button('🔮 開始 AI 預測', use_container_width=True):
+            # 💡 必須把這段加回來，不然 requests 找不到東西傳送！
             files = {'file': (uploaded.name, uploaded.getvalue(), 'image/jpeg')}
             params = {}
             if use_gc:
                 params['gradcam'] = 'true'
 
-            # 現在只需要傳送 speed 一個參數
+            # 確保轉速參數有被正確送出
             if has_params:
                 params['speed'] = speed_rpm
 
@@ -66,10 +68,72 @@ if tab == '👨‍🔧 一般使用者 (現場檢測)':
                             else:
                                 st.info("🎯 本次預測採用【影像 + 轉速 雙通道高精度分析】")
 
+                            # 顯示熱力圖
                             if j.get('heatmap'):
                                 st.image(j.get('heatmap'), caption='Grad-CAM 刀痕解析熱力圖', width='stretch')
-                            elif j.get('heatmap_error'):
-                                st.warning(f"熱力圖生成失敗：{j.get('heatmap_error')}")
+
+                            # 🌟 繪製 XAI 深度解析面板與取樣框 🌟
+                            if 'xai_details' in j:
+                                details = j['xai_details']
+                                patches_info = details['patches_info']
+
+                                st.markdown("---")
+                                st.markdown("### 📊 AI 決策深度解析 (XAI) 檢測報告")
+                                st.info(f"💡 **檢測原理說明**：本系統採用 **蒙地卡羅隨機取樣 (Monte Carlo TTA)** 技術。為了避免金屬表面的灰塵或異常反光干擾，AI 隨機在影像中擷取了 **{details['num_patches']}** 個局部區塊進行獨立分析，並自動剔除偏差最大的極端值，確保最終結果精準可靠。")
+
+                                # 1. 在原圖上繪製取樣框
+                                img_with_boxes = img.copy()
+                                draw = ImageDraw.Draw(img_with_boxes)
+
+                                for p in patches_info:
+                                    coords = p['coords']
+                                    # 根據狀態決定框的顏色
+                                    if "保留" in p['status']:
+                                        color = "green"
+                                    elif "異常高值" in p['status']:
+                                        color = "red" # 偏高可能是有灰塵或刮痕
+                                    else:
+                                        color = "yellow" # 偏低
+
+                                    # 畫矩形框，寬度稍微加粗
+                                    draw.rectangle(
+                                        [coords['left'], coords['top'], coords['right'], coords['bottom']],
+                                        outline=color,
+                                        width=4
+                                    )
+
+                                st.image(img_with_boxes, caption='隨機取樣區域可視化 (綠框: 採用, 紅/黃框: 剔除極端值)', width='stretch')
+
+                                # 2. 顯示數據統計指標
+                                col1, col2, col3 = st.columns(3)
+                                col1.metric("總取樣次數", f"{details['num_patches']} 次")
+                                col2.metric("剔除極端值數量", f"{details['trim_count'] * 2} 次")
+                                col3.metric("計算平均採用次數", f"{details['num_patches'] - (details['trim_count'] * 2)} 次")
+
+                                # 3. 使用 Altair 繪製散佈分佈圖
+                                chart_data = []
+                                for p in patches_info:
+                                    chart_data.append({
+                                        "區塊編號": f"Patch {p['id']}",
+                                        "預測粗糙度 (Ra)": p['ra'],
+                                        "狀態": p['status']
+                                    })
+                                df = pd.DataFrame(chart_data)
+
+                                chart = alt.Chart(df).mark_circle(size=100).encode(
+                                    x=alt.X('區塊編號', sort=None, title='隨機取樣區塊 (依數值排序)'),
+                                    y=alt.Y('預測粗糙度 (Ra)', scale=alt.Scale(zero=False), title='Ra 值 (μm)'),
+                                    color=alt.Color('狀態', scale=alt.Scale(
+                                        domain=['保留 (有效計算區間)', '剔除 (異常低值)', '剔除 (異常高值/可能含灰塵)'],
+                                        range=['#28a745', '#ffc107', '#dc3545']
+                                    )),
+                                    tooltip=['區塊編號', '預測粗糙度 (Ra)', '狀態']
+                                ).properties(
+                                    height=300
+                                ).interactive()
+
+                                st.altair_chart(chart, use_container_width=True)
+
                     else:
                         st.error(f"後端報錯 (代碼 {r.status_code})：{r.text}")
                 except Exception as e:

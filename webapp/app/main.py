@@ -134,52 +134,81 @@ async def predict(
     # 🌟 核心升級：蒙地卡羅隨機取樣與極端值過濾 (TTA)
     # ==========================================
 
-    
+
     # 1. 影像轉 Numpy 陣列並設定取樣參數
     img_np = np.array(img)
     h, w, _ = img_np.shape
-    
-    # 定義每次預測要「隨機抽幾塊」以及「每塊的大小」
-    num_patches = 16 
-    crop_h, crop_w = h // 2, w // 2  # 每次隨機擷取 1/4 面積的局部特徵
-    
-    # 2. 隨機撒網擷取小圖 (無限種可能)
+
+    num_patches = 32
+    crop_h, crop_w = h // 2, w // 2
+
     patches = []
+    patch_coords = [] # 💡 新增：用來記錄每個取樣框的座標
     for _ in range(num_patches):
-        # 隨機決定裁切的左上角座標
         top = random.randint(0, h - crop_h)
         left = random.randint(0, w - crop_w)
-        
+
+        # 記錄座標資訊
+        patch_coords.append({
+            "top": top,
+            "left": left,
+            "bottom": top + crop_h,
+            "right": left + crop_w
+        })
+
         patch_arr = img_np[top:top+crop_h, left:left+crop_w]
         patches.append(Image.fromarray(patch_arr))
 
-    # 3. 將這 16 張隨機小圖打包送入設備
     batch_tensors = torch.stack([transform(p) for p in patches]).to(device)
 
-    # 4. 複製 16 份轉速參數
     params_tensor = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]] * num_patches, dtype=torch.float32).to(device)
 
-    # 5. 讓 RTX 5070 Ti 一次平行算完 16 個隨機區塊
     model.eval()
     with torch.no_grad():
         preds = model(batch_tensors, params_tensor).cpu().numpy().flatten()
 
-    # 6. 🛡️ 進階數據清洗：動態修剪平均值
-    preds_sorted = np.sort(preds)
-    # 踢除最高 15% 與最低 15% 的極端值 (徹底無視灰塵與刮痕)
-    trim_count = int(num_patches * 0.15) 
-    valid_preds = preds_sorted[trim_count:-trim_count]
-    
+    # 將預測結果與座標綁定，方便後續排序追蹤
+    preds_with_coords = list(zip(preds, patch_coords))
+    # 依照 Ra 值排序
+    preds_sorted_with_coords = sorted(preds_with_coords, key=lambda x: x[0])
+
+    # 提取排序後的預測值
+    preds_sorted = [x[0] for x in preds_sorted_with_coords]
+
+    trim_count = int(num_patches * 0.15)
+    valid_preds = preds_sorted[trim_count:-trim_count] if trim_count > 0 else preds_sorted
+
     final_ra = float(np.mean(valid_preds))
+
+    # 整理帶有座標的詳細結果
+    detailed_patches = []
+    for i, (val, coords) in enumerate(preds_sorted_with_coords):
+        if i < trim_count:
+            status = "剔除 (異常低值)"
+        elif i >= len(preds_sorted_with_coords) - trim_count:
+            status = "剔除 (異常高值/可能含灰塵)"
+        else:
+            status = "保留 (有效計算區間)"
+
+        detailed_patches.append({
+            "id": i + 1,
+            "ra": float(val),
+            "status": status,
+            "coords": coords
+        })
+
     # ==========================================
 
     result = {
         "ra": final_ra,
         "used_default_params": used_default,
-        "raw_9_patches_ra": preds.tolist() # 附上原始 9 宮格數據供開發除錯
+        "xai_details": {
+            "num_patches": num_patches,
+            "trim_count": trim_count,
+            "patches_info": detailed_patches # 💡 回傳包含座標的詳細資訊
+        }
     }
-
-    # ==========================================
+    #=======================================
     # 🎨 保持 Grad-CAM 視覺化支援 (使用整張全圖)
     # ==========================================
     if gradcam:

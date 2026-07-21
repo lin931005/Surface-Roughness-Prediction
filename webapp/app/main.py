@@ -168,19 +168,22 @@ async def predict(
         preds = model(batch_tensors, params_tensor).cpu().numpy().flatten()
 
     # ==========================================
-    # 🚨 修正 2：真正能擋住橘貓的 OOD 異常影像偵測 (HSV 飽和度分析)
+    # 🚨 修正 2：改用「RGB 空間顏色豐富度 (Color Std)」來精準攔截
     # ==========================================
-    # 將圖片轉換為 HSV 色彩空間 (Hue, Saturation, Value)
-    img_hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
+    # 計算 R, G, B 三個 Channel 在整張空間分佈上的標準差平均
+    # 日常照片因為有複雜背景與多色彩角色，標準差會極高 (> 45)
+    # 金屬顯微鏡照片即使偏色，區域間的顏色變化也很均勻，標準差通常極低 (< 30)
+    std_r = np.std(img_np[:, :, 0])
+    std_g = np.std(img_np[:, :, 1])
+    std_b = np.std(img_np[:, :, 2])
 
-    # 取出 S (Saturation 飽和度) 通道並計算整張圖的平均飽和度
-    mean_saturation = float(np.mean(img_hsv[:, :, 1]))
+    color_std_score = float((std_r + std_g + std_b) / 3.0)
 
-    # 設定飽和度門檻，大於 30 就視為非工業金屬的彩色異常圖片
-    is_anomaly = bool(mean_saturation > 60)
+    # 門檻設在 40.0 (金屬通常 < 30，日常照片通常 > 50)
+    is_anomaly = bool(color_std_score > 55.0)
 
-    # 我們將這個飽和度數值傳給前端，這樣觸發警告時你就能看到貓咪的飽和度有多高
-    color_variance = mean_saturation
+    # 傳給前端顯示
+    color_variance = color_std_score
     # ==========================================
 
     preds_with_coords = list(zip(preds, patch_coords))

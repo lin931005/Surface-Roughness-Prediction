@@ -95,7 +95,7 @@ if tab == '👨‍🔧 一般使用者 (現場檢測)':
                                 if not st.session_state['force_override']:
                                     st.error(f"🚨 **異常影像警告：拒絕執行分析**")
                                     # 💡 把消失的 HSV 數值加回來了！
-                                    st.warning(f"系統偵測到此圖片缺乏均勻的金屬切削紋理 (HSV 飽和度高達 {j.get('preds_std'):.2f})！這顯然不是一張標準的顯微鏡工件照片。")
+                                    st.warning(f"系統偵測到此圖片缺乏均勻的金屬切削紋理 (色彩變化度 Color Std 高達 {j.get('preds_std'):.2f})！這顯然不是一張標準的顯微鏡工件照片。")
 
                                     meme_folder = os.path.join("data", "Utfg2026")
 
@@ -119,7 +119,7 @@ if tab == '👨‍🔧 一般使用者 (現場檢測)':
                                             # ==========================================
 
                                             st.image(random_img_path)
-                                            st.markdown("<h4 style='text-align: center; color: #ff4b4b;'>您的照片似乎不符合標準，請參考這些照片(並沒有)</h4>", unsafe_allow_html=True)
+                                            st.markdown("<h4 style='text-align: center; color: #ff4b4b;'>您的照片似乎不符合標準，請參考上方照片(並沒有)</h4>", unsafe_allow_html=True)
 
                                             st.button("🔄 換一張參考照片", on_click=trigger_next_meme)
                                         else:
@@ -139,7 +139,7 @@ if tab == '👨‍🔧 一般使用者 (現場檢測)':
                             # ======= 下面是原本正常的流程 =======
                             st.success(f"### ✨ 預測表面粗糙度 (Ra): **{j.get('ra'):.4f} μm**")
 
-                            st.info(f"📊 **參數監控面板**：本影像之平均 HSV 飽和度為 **{j.get('preds_std'):.2f}** ")
+                            st.info(f"📊 **參數監控面板**：本影像之 RGB 色彩變化度 (Color Std) 為 **{j.get('preds_std'):.2f}** ")
 
                             # (後續熱力圖與 XAI 的程式碼保持原樣...)
                             if j.get('used_default_params'):

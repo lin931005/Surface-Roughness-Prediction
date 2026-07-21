@@ -136,9 +136,14 @@ async def predict(
     # ==========================================
 
 
-    # 1. 影像轉 Numpy 陣列並設定取樣參數
-    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-    img_np = np.array(img)
+    # 1. 影像轉 Numpy 陣列並設定取樣參數 (💡 核心修正：正式導入黑白特徵)
+    # 為了計算彩色變異度 (防禦機制)，我們先保留一張彩色 Numpy 陣列
+    img_color_np = np.array(img)
+    img_cv = cv2.cvtColor(img_color_np, cv2.COLOR_RGB2BGR)
+
+    # 💡 將要餵給 AI 預測的底圖，強制轉為灰階 (L)，再轉回 3 通道 (RGB) 讓 ResNet 接受
+    img_bw = img.convert('L').convert('RGB')
+    img_np = np.array(img_bw) # 接下來所有的 patches 都會從這張乾淨的黑白圖去切！
     h, w, _ = img_np.shape
 
     num_patches = 32
@@ -168,22 +173,28 @@ async def predict(
         preds = model(batch_tensors, params_tensor).cpu().numpy().flatten()
 
     # ==========================================
-    # 🚨 修正 2：改用「RGB 空間顏色豐富度 (Color Std)」來精準攔截
+    # 🚨 終極修正：色彩變異度 + 邊緣紋理 雙重防禦
     # ==========================================
-    # 計算 R, G, B 三個 Channel 在整張空間分佈上的標準差平均
-    # 日常照片因為有複雜背景與多色彩角色，標準差會極高 (> 45)
-    # 金屬顯微鏡照片即使偏色，區域間的顏色變化也很均勻，標準差通常極低 (< 30)
+    # 1. 第一道鎖：計算色彩空間變化度 (擋下彩色/複雜照片)
     std_r = np.std(img_np[:, :, 0])
     std_g = np.std(img_np[:, :, 1])
     std_b = np.std(img_np[:, :, 2])
-
     color_std_score = float((std_r + std_g + std_b) / 3.0)
 
-    # 門檻設在 40.0 (金屬通常 < 30，日常照片通常 > 50)
-    is_anomaly = bool(color_std_score > 55.0)
+    # 2. 第二道鎖：計算邊緣紋理銳利度 (擋下白板、模糊截圖、平滑影像)
+    # 先將圖片轉為灰階
+    gray_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    # 使用 Laplacian 運算子計算梯度的變異數 (數值越高代表邊緣紋理越強烈)
+    edge_score = float(cv2.Laplacian(gray_img, cv2.CV_64F).var())
 
-    # 傳給前端顯示
-    color_variance = color_std_score
+    # 綜合判定：
+    # 條件 A：色彩變異太大 (> 54.0) -> 不是金屬 (可能是貓咪或風景)
+    # 條件 B：邊緣紋理太少 (< 100.0，數值可依你的顯微鏡照片微調) -> 不是金屬 (可能是白板或平滑截圖)
+    is_anomaly = bool(color_std_score > 54.0 or edge_score < 20.0)
+
+    # 將這兩個數值傳給前端，方便監控
+    preds_std = color_std_score
+    preds_edge = edge_score  # 記得在前端把它印出來觀察！
     # ==========================================
 
     preds_with_coords = list(zip(preds, patch_coords))
@@ -214,8 +225,9 @@ async def predict(
     result = {
         "ra": final_ra,
         "used_default_params": used_default,
-        "is_anomaly": is_anomaly,      # 💡 是否為異常圖片
-        "preds_std": color_variance,   # 💡 偷偷把這裡換成色彩變異數傳給前端顯示
+        "is_anomaly": is_anomaly,
+        "preds_std": preds_std,        # ✅ 修正：改用正確的色彩變異數變數
+        "preds_edge": preds_edge,      # ✅ 順手補上：把 Laplacian 紋理邊緣分數也傳給前端！
         "xai_details": {
             "num_patches": num_patches,
             "trim_count": trim_count,

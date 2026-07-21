@@ -139,9 +139,26 @@ if tab == '👨‍🔧 一般使用者 (現場檢測)':
                             # ======= 下面是原本正常的流程 =======
                             st.success(f"### ✨ 預測表面粗糙度 (Ra): **{j.get('ra'):.4f} μm**")
 
-                            st.info(f"📊 **參數監控面板**：本影像之 RGB 色彩變化度 (Color Std) 為 **{j.get('preds_std'):.2f}** ")
+                            # ==========================================
+                            # 💡 新增：展示 AI 實際用來分析的黑白去雜訊影像
+                            # ==========================================
+                            st.markdown("#### 🔬 AI 視覺預處理可視化")
+                            col_orig, col_bw = st.columns(2)
 
-                            # (後續熱力圖與 XAI 的程式碼保持原樣...)
+                            with col_orig:
+                                st.image(img, caption='1. 原始彩色輸入', use_column_width=True)
+
+                            with col_bw:
+                                # 將原本的 PIL 圖片 (img) 轉換為 L 模式 (黑白灰階)
+                                bw_img = img.convert('L')
+                                st.image(bw_img, caption='2. 濾除色彩雜訊 (AI 實際分析之特徵)', use_column_width=True)
+                            # ==========================================
+
+                            # 💡 更新監控面板文字與門檻值 (加入 edge_score 如果後端有傳的話)
+                            preds_std = j.get('preds_std', 0)
+                            preds_edge = j.get('preds_edge', '未提供')
+                            st.info(f"📊 **參數監控面板**：Color Std (色彩變異): **{preds_std:.2f}**  | Laplacian (紋理邊緣): **{preds_edge}**")
+
                             if j.get('used_default_params'):
                                 st.warning("⚠️ 本次預測採用【純視覺分析】(套用基準轉速)。若輸入實際轉速，預測將更精準喔！")
                             else:

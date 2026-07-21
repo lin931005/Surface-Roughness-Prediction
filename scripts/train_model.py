@@ -98,7 +98,8 @@ class SurfaceDataset(Dataset):
                 raise ValueError(f"無法解碼圖片，檔案可能損壞: {img_path}")
 
             img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-            img_pil = Image.fromarray(img_rgb)
+            # 💡 核心修正：將陣列轉成 PIL 圖片後，立刻轉灰階 (L) 再轉回三通道 (RGB)
+            img_pil = Image.fromarray(img_rgb).convert('L').convert('RGB')
         except Exception as e:
             raise IOError(f"讀取圖片時發生錯誤 {img_path}: {str(e)}")
 

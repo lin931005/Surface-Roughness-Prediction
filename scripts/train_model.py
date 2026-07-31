@@ -14,39 +14,29 @@ import numpy as np
 import torchvision.models as models
 import torchvision.transforms as transforms
 from PIL import Image
-
+import time
 import functools
+
 print = functools.partial(print, flush=True)
 
 # ------------------------------------------
 # 參數設定
 # ------------------------------------------
 SEED = 42
-# 猛獸級 Batch Size：讓 GPU 一次平行處理更多圖片，大幅穩定梯度下降方向
-BATCH_SIZE = 64  # 如果你的 5070 Ti VRAM 很大，甚至可以開到 128
-# 多核心數據搬運工：解除 CPU 限制，確保 GPU 不會發呆等資料
+BATCH_SIZE = 64
 NUM_WORKERS = min(8, os.cpu_count() or 4)
 VALIDATION_SPLIT = 0.2
-# 給予極大的耐心：因為資料多且模型複雜，需要更多時間慢慢收斂
 PATIENCE = 40
 LR = 1e-4
-# 深度學習馬拉松：有時間就讓它跑滿，AI 會自己提早結束
 EPOCHS = 200
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 from project_root import str_path
-
-
 
 BASE_DIR = str_path()
 CSV_PATH = str_path('data', 'final_training_manifest.csv')
 RESULTS_DIR = str_path('results')
-BEST_MODEL_PATH = str_path('results', 'best_surface_model.pth')
-CHECKPOINT_PATH = str_path('results', 'best_surface_checkpoint.pth')
-LOSS_CSV_PATH = str_path('results', 'loss_record.csv')
 
-# ImageNet normalization for ResNet pretrained backbone
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
@@ -58,16 +48,11 @@ class SurfaceDataset(Dataset):
         self.data_info = data_frame.reset_index(drop=True)
         self.is_train = is_train
 
-        # 針對金屬表面紋理強化的擴增策略
         self.train_transform = transforms.Compose([
-            # 1. 隨機縮放並裁切：模擬顯微鏡在不同區域、不同倍率的觀察 (這是增加資料量的大絕招)
             transforms.RandomResizedCrop(224, scale=(0.5, 1.0), ratio=(0.9, 1.1)),
-            # 2. 隨機水平/垂直翻轉：加工紋理上下左右翻轉後，Ra 值物理意義不變
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
-            # 3. 隨機旋轉：小角度旋轉模擬放置工件時的微小偏移 (-15度 到 15度)
             transforms.RandomRotation(degrees=15),
-            # 4. 色彩擾動：模擬顯微鏡光源明暗不均的問題
             transforms.ColorJitter(brightness=0.3, contrast=0.3),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
@@ -80,13 +65,9 @@ class SurfaceDataset(Dataset):
         ])
 
     def __len__(self):
-        if self.is_train:
-            return len(self.data_info) * 2
-        return len(self.data_info)
+        return len(self.data_info) * 2 if self.is_train else len(self.data_info)
 
     def __getitem__(self, idx):
-        # 假設原本有 220 張圖，當 idx 是 221 時，會自動去讀取第 1 張圖 (221 % 220 = 1)
-        # 搭配前面的 RandomResizedCrop，AI 就會看到同一張圖的「另一種隨機裁切視角」
         real_idx = idx % len(self.data_info)
         row = self.data_info.iloc[real_idx]
         img_path = row['image_path']
@@ -98,7 +79,7 @@ class SurfaceDataset(Dataset):
                 raise ValueError(f"無法解碼圖片，檔案可能損壞: {img_path}")
 
             img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-            # 💡 核心修正：將陣列轉成 PIL 圖片後，立刻轉灰階 (L) 再轉回三通道 (RGB)
+            # 💡 核心修正：將陣列轉成 PIL 圖片後，立刻轉灰階 (L) 去除色彩，再轉回三通道 (RGB)
             img_pil = Image.fromarray(img_rgb).convert('L').convert('RGB')
         except Exception as e:
             raise IOError(f"讀取圖片時發生錯誤 {img_path}: {str(e)}")
@@ -107,19 +88,18 @@ class SurfaceDataset(Dataset):
         img_tensor = transform(img_pil)
 
         speed = float(row['speed']) / 10000.0
-        cond = float(row['condition_id']) / 10.0
+        cond = 0.0 # 💡 修正：廢棄字串編號轉換，統一設為 0.0 配合推論端
         params = np.array([speed, cond], dtype=np.float32)
         ra_target = np.array([row['ra_target']], dtype=np.float32)
 
         return img_tensor, torch.tensor(params), torch.tensor(ra_target)
 
 # ==========================================
-# 2. 雙輸入 AI 模型 (ResNet-18 全局微調)
+# 2. 雙輸入 AI 模型 (ResNet-50 全局微調)
 # ==========================================
 class ResNetDualInputModel(nn.Module):
     def __init__(self):
         super(ResNetDualInputModel, self).__init__()
-        # 升級為擁有 50 層深度特徵萃取能力的 ResNet-50 大腦
         self.resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
 
         num_ftrs = self.resnet.fc.in_features
@@ -146,7 +126,7 @@ class ResNetDualInputModel(nn.Module):
         return self.fc(combined)
 
 # ==========================================
-# 3. 工具函式
+# 3. 工具函式與主程式
 # ==========================================
 def set_seed(seed: int):
     random.seed(seed)
@@ -154,7 +134,6 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
 
 def evaluate(model, dataloader, criterion, device):
     model.eval()
@@ -170,25 +149,36 @@ def evaluate(model, dataloader, criterion, device):
             total_loss += loss.item()
     return total_loss / len(dataloader)
 
-
 def main():
     parser = argparse.ArgumentParser()
+    # 💡 核心新增：必須指定訓練哪一種加工法！
+    parser.add_argument('--milling_type', type=str, required=True, choices=['End_Milling', 'Peripheral_Milling'], help='指定要訓練的銑削類型')
     parser.add_argument('--output', type=str, default=None, help='output model path')
     parser.add_argument('--log', type=str, default=None, help='progress log path')
     args = parser.parse_args()
 
-    print("準備載入資料與模型...")
+    print(f"🚀 準備啟動【{args.milling_type} 專家大腦】專屬訓練管線...")
     set_seed(SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    # 💡 動態命名輸出檔案
+    BEST_MODEL_PATH = os.path.join(RESULTS_DIR, f'best_model_{args.milling_type}.pth')
+    LOSS_CSV_PATH = os.path.join(RESULTS_DIR, f'loss_record_{args.milling_type}.csv')
+
     if not os.path.exists(CSV_PATH):
         raise FileNotFoundError(f"找不到 CSV 檔案：{CSV_PATH}")
-    os.makedirs(RESULTS_DIR, exist_ok=True)
 
     data_df = pd.read_csv(CSV_PATH)
+
+    # 💡 核心過濾：只挑選符合當前 milling_type 的資料來訓練！
+    data_df = data_df[data_df['machining_type'] == args.milling_type].copy()
+
     if data_df.empty:
-        raise ValueError("訓練清單為空，請確認 final_training_manifest.csv 是否包含資料。")
+        raise ValueError(f"❌ 在 CSV 中找不到任何 {args.milling_type} 的資料，請檢查清單！")
+
+    print(f"📂 成功載入 {len(data_df)} 筆 {args.milling_type} 影像資料！")
 
     data_df = data_df.sample(frac=1, random_state=SEED).reset_index(drop=True)
     val_size = max(1, int(len(data_df) * VALIDATION_SPLIT))
@@ -198,52 +188,28 @@ def main():
     train_dataset = SurfaceDataset(train_df, is_train=True)
     val_dataset = SurfaceDataset(val_df, is_train=False)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=NUM_WORKERS,
-        pin_memory=(device.type == 'cuda'),
-        persistent_workers=(NUM_WORKERS > 0),
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS,
-        pin_memory=(device.type == 'cuda'),
-        persistent_workers=(NUM_WORKERS > 0),
-    )
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
 
     model = ResNetDualInputModel().to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=LR)
-    scheduler_kwargs = {
-        'mode': 'min',
-        'patience': 3,
-        'factor': 0.5,
-    }
-    if 'verbose' in inspect.signature(optim.lr_scheduler.ReduceLROnPlateau).parameters:
-        scheduler_kwargs['verbose'] = True
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, **scheduler_kwargs)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
     scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
     best_val_loss = float('inf')
     epochs_without_improve = 0
     stats = []
-
     torch.backends.cudnn.benchmark = True
 
-    print(f"開始進行 {EPOCHS} 回合的全局微調訓練！\n" + "-" * 50)
+    print(f"🔥 開始進行 {EPOCHS} 回合的全局微調訓練！\n" + "-" * 50)
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
         train_loss = 0.0
 
         for batch_imgs, batch_params, batch_targets in train_loader:
-            batch_imgs = batch_imgs.to(device)
-            batch_params = batch_params.to(device)
-            batch_targets = batch_targets.to(device)
+            batch_imgs, batch_params, batch_targets = batch_imgs.to(device), batch_params.to(device), batch_targets.to(device)
 
             optimizer.zero_grad()
             with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
@@ -259,87 +225,28 @@ def main():
         avg_val_loss = evaluate(model, val_loader, criterion, device)
         scheduler.step(avg_val_loss)
 
-        stats.append({
-            'epoch': epoch,
-            'train_loss': avg_train_loss,
-            'val_loss': avg_val_loss,
-        })
+        stats.append({'epoch': epoch, 'train_loss': avg_train_loss, 'val_loss': avg_val_loss})
 
-        print(
-            f"第 {epoch:02d}/{EPOCHS} 回合完成 | train_loss: {avg_train_loss:.4f} | val_loss: {avg_val_loss:.4f}"
-        )
+        print(f"第 {epoch:02d}/{EPOCHS} 回合 | {args.milling_type} | train_loss: {avg_train_loss:.4f} | val_loss: {avg_val_loss:.4f}")
 
-        # write progress to log if provided
-        try:
-            log_dir = os.path.join(RESULTS_DIR, 'train_logs')
-            os.makedirs(log_dir, exist_ok=True)
-            if args.log:
-                log_path = args.log
-            else:
-                log_path = os.path.join(log_dir, f'train_progress_{int(time.time())}.jsonl')
-            entry = {
-                'epoch': epoch,
-                'train_loss': float(avg_train_loss),
-                'val_loss': float(avg_val_loss),
-                'timestamp': int(time.time())
-            }
-            with open(log_path, 'a', encoding='utf-8') as lf:
-                lf.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        import json
+        print(json.dumps({'epoch': epoch, 'train_loss': avg_train_loss, 'val_loss': avg_val_loss}))
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_without_improve = 0
             torch.save(model.state_dict(), BEST_MODEL_PATH)
-            torch.save(
-                {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scaler_state_dict': scaler.state_dict(),
-                    'best_val_loss': best_val_loss,
-                },
-                CHECKPOINT_PATH,
-            )
-            # if output path provided, also save full model and metadata
-            if args.output:
-                try:
-                    torch.save(model.state_dict(), args.output)
-                    # write metadata next to model
-                    try:
-                        meta = {
-                            'best_val_loss': float(best_val_loss),
-                            'epoch': int(epoch),
-                            'timestamp': int(time.time()),
-                            'params': {
-                                'batch_size': BATCH_SIZE,
-                                'lr': LR,
-                                'epochs': EPOCHS
-                            }
-                        }
-                        meta_path = args.output + '.meta.json'
-                        with open(meta_path, 'w', encoding='utf-8') as mf:
-                            json.dump(meta, mf, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-            print(f"已儲存最佳模型與檢查點：{BEST_MODEL_PATH}")
+            print(f"  👉 已儲存最佳 {args.milling_type} 模型！")
         else:
             epochs_without_improve += 1
 
         if epochs_without_improve >= PATIENCE:
-            print(
-                f"已連續 {PATIENCE} 個 epoch 未進步，提前停止訓練。"
-            )
+            print(f"已連續 {PATIENCE} 個 epoch 未進步，提前停止訓練。")
             break
 
     loss_df = pd.DataFrame(stats)
     loss_df.to_csv(LOSS_CSV_PATH, index=False)
-    print(f"Loss 歷史紀錄已儲存至：{LOSS_CSV_PATH}")
-    print("訓練完成！")
-
+    print(f"🎉 {args.milling_type} 訓練完成！模型已儲存至：{BEST_MODEL_PATH}")
 
 if __name__ == '__main__':
     main()

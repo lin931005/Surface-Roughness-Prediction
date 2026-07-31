@@ -11,7 +11,6 @@ import torchvision.models as models
 import torchvision.transforms as T
 import os
 import subprocess
-import zipfile
 import time
 import cv2
 import pandas as pd
@@ -20,6 +19,8 @@ import base64
 import numpy as np
 import matplotlib
 import random
+import asyncio
+import gc
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
@@ -28,37 +29,35 @@ from .auth import admin_auth, verify_credentials, create_token
 app = FastAPI()
 
 # ==========================================
-# 🔍 1. 模型路徑與載入設定
+# 🔍 1. 模型路徑與載入設定 (雙專家 + 分類器)
 # ==========================================
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-MODELS_DIR = os.path.join(BASE_DIR, 'results', 'models')
+MODELS_DIR = os.path.join(BASE_DIR, 'results')
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-ACTIVE_MODEL_LINK = os.path.join(BASE_DIR, 'results', 'current_model.pth')
-MODEL_PATH = ACTIVE_MODEL_LINK if os.path.exists(ACTIVE_MODEL_LINK) else os.path.join(BASE_DIR, 'results', 'best_surface_model.pth')
+MODEL_END_PATH = os.path.join(MODELS_DIR, 'best_model_End_Milling.pth')
+MODEL_PERI_PATH = os.path.join(MODELS_DIR, 'best_model_Peripheral_Milling.pth')
+CLASSIFIER_PATH = os.path.join(MODELS_DIR, 'best_classifier.pth')
 
 # ==========================================
-# 🧠 2. 定義雙輸入神經網路骨架 (ResNet18 + DNN)
+# 🧠 2. 智慧動態記憶體管理 (動態加載/卸載)
 # ==========================================
+expert_models = {"End_Milling": None, "Peripheral_Milling": None}
+classifier_model = None
+
+# 全域狀態與計時器
+models_are_loaded = False
+last_active_time = time.time()
+IDLE_TIMEOUT_SECONDS = 600  # 閒置 10 分鐘 (600 秒) 後自動卸載
+
 class ResNetDualInputModel(nn.Module):
     def __init__(self):
         super(ResNetDualInputModel, self).__init__()
         self.resnet = models.resnet50(weights=None)
-
         num_ftrs = self.resnet.fc.in_features
-        self.resnet.fc = nn.Sequential(
-            nn.Linear(num_ftrs, 64),
-            nn.ReLU(),
-        )
-        self.dnn = nn.Sequential(
-            nn.Linear(2, 16),
-            nn.ReLU(),
-        )
-        self.fc = nn.Sequential(
-            nn.Linear(64 + 16, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1),
-        )
+        self.resnet.fc = nn.Sequential(nn.Linear(num_ftrs, 64), nn.ReLU())
+        self.dnn = nn.Sequential(nn.Linear(2, 16), nn.ReLU())
+        self.fc = nn.Sequential(nn.Linear(64 + 16, 32), nn.ReLU(), nn.Linear(32, 1))
 
     def forward(self, img, params):
         img_features = self.resnet(img)
@@ -66,34 +65,75 @@ class ResNetDualInputModel(nn.Module):
         combined = torch.cat((img_features, param_features), dim=1)
         return self.fc(combined)
 
-model = None
+class ClassifierModel(nn.Module):
+    def __init__(self):
+        super(ClassifierModel, self).__init__()
+        self.resnet = models.resnet18(weights=None)
+        num_ftrs = self.resnet.fc.in_features
+        self.resnet.fc = nn.Linear(num_ftrs, 2)
 
-def load_model():
-    global model
-    if model is None:
-        if os.path.exists(MODEL_PATH):
-            try:
-                print("▶️ 正在建立雙輸入 ResNet-50 骨架...")
-                model = ResNetDualInputModel()
+    def forward(self, img):
+        return self.resnet(img)
 
-                print("▶️ 正在載入模型權重...")
-                weights = torch.load(MODEL_PATH, map_location='cpu')
+def load_models_on_demand():
+    """需要預測時才掛載模型"""
+    global expert_models, classifier_model, models_are_loaded
+    if models_are_loaded:
+        return
 
-                if isinstance(weights, dict) and 'state_dict' in weights:
-                    model.load_state_dict(weights['state_dict'])
-                else:
-                    model.load_state_dict(weights)
+    print("⏳ 偵測到模型尚未載入，正在將大腦掛載至 GPU 記憶體...")
+    if os.path.exists(MODEL_END_PATH):
+        model = ResNetDualInputModel()
+        model.load_state_dict(torch.load(MODEL_END_PATH, map_location='cpu'))
+        model.eval()
+        expert_models["End_Milling"] = model
 
-                model.eval()
-                print("✅ AI 雙輸入模型載入成功，大腦已上線！\n")
-            except Exception as e:
-                print(f"❌ 模型載入發生異常：{str(e)}\n")
-                model = None
-        else:
-            print("❌ 找不到模型檔案！")
-            model = None
+    if os.path.exists(MODEL_PERI_PATH):
+        model = ResNetDualInputModel()
+        model.load_state_dict(torch.load(MODEL_PERI_PATH, map_location='cpu'))
+        model.eval()
+        expert_models["Peripheral_Milling"] = model
 
-load_model()
+    if os.path.exists(CLASSIFIER_PATH):
+        model = ClassifierModel()
+        model.load_state_dict(torch.load(CLASSIFIER_PATH, map_location='cpu'))
+        model.eval()
+        classifier_model = model
+
+    models_are_loaded = True
+    print("✅ 模型掛載完成，系統已進入戰鬥狀態！")
+
+def unload_models_to_free_vram():
+    """徹底卸載模型並清空 GPU 記憶體"""
+    global expert_models, classifier_model, models_are_loaded
+    if not models_are_loaded:
+        return
+
+    print("💤 系統閒置或即將進行訓練，正在卸載模型並釋放 GPU 資源...")
+    expert_models["End_Milling"] = None
+    expert_models["Peripheral_Milling"] = None
+    classifier_model = None
+    models_are_loaded = False
+
+    # 強制執行垃圾回收與 CUDA 記憶體清理
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("🧹 GPU 記憶體已清空！")
+
+# 背景計時器：每 60 秒檢查一次是否超時 10 分鐘
+async def idle_timeout_checker():
+    global last_active_time
+    while True:
+        await asyncio.sleep(60)
+        if models_are_loaded and (time.time() - last_active_time > IDLE_TIMEOUT_SECONDS):
+            unload_models_to_free_vram()
+
+@app.on_event("startup")
+async def startup_event():
+    # 伺服器啟動時，開始跑背景的閒置計時器 (此時不載入模型)
+    asyncio.create_task(idle_timeout_checker())
+    print("🚀 API 伺服器已啟動，閒置卸載監控已開啟 (10分鐘超時)。")
 
 transform = T.Compose([
     T.Resize((224, 224)),
@@ -102,152 +142,109 @@ transform = T.Compose([
 ])
 
 # ==========================================
-# 🚀 3. 預測核心 API (九宮格強化版)
+# 🚀 3. 預測核心 API
 # ==========================================
 @app.post("/predict")
 async def predict(
     file: UploadFile = File(...),
     gradcam: bool = Query(False),
-    speed: float = Query(None)  # 移除 condition，只接收 speed
+    speed: float = Query(None),
+    milling_type: str = Query("Auto")
 ):
+    global last_active_time
+    last_active_time = time.time()  # 💡 有人呼叫預測，重置 10 分鐘計時器！
+
+    # 💡 確保模型有掛載
+    load_models_on_demand()
+
     contents = await file.read()
     try:
         img = Image.open(io.BytesIO(contents)).convert('RGB')
-    except Exception as e:
+    except Exception:
         return JSONResponse({"error": "invalid image"}, status_code=400)
 
-    if model is None:
-        return JSONResponse({"error": "model not loaded"}, status_code=500)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 偵測目前模型在哪個設備運作 (自動相容 CPU 與 CUDA)
-    device = next(model.parameters()).device
+    final_milling_type = milling_type
+    if milling_type == "Auto":
+        if classifier_model is not None:
+            classifier_model.to(device)
+            with torch.no_grad():
+                img_tensor = transform(img).unsqueeze(0).to(device)
+                out = classifier_model(img_tensor)
+                pred_class = torch.argmax(out, dim=1).item()
+                final_milling_type = "Peripheral_Milling" if pred_class == 1 else "End_Milling"
+        else:
+            final_milling_type = "End_Milling"
 
-    # 處理「選填」的機台參數
+    target_model = expert_models.get(final_milling_type)
+    if target_model is None:
+        return JSONResponse({"error": f"尚未載入 {final_milling_type} 的模型，請先訓練！"}, status_code=500)
+
+    target_model.to(device)
+
     used_default = False
     if speed is None:
-        speed = 5000.0  # 如果沒填，給予一個預設平均轉速
+        speed = 5000.0
         used_default = True
-
-    # 手動補上 dummy_condition 避免模型維度錯誤
     dummy_condition = 0.0
 
-    # ==========================================
-    # 🌟 核心升級：蒙地卡羅隨機取樣與極端值過濾 (TTA)
-    # ==========================================
-
-
-    # 1. 影像轉 Numpy 陣列並設定取樣參數 (💡 核心修正：正式導入黑白特徵)
-    # 為了計算彩色變異度 (防禦機制)，我們先保留一張彩色 Numpy 陣列
     img_color_np = np.array(img)
     img_cv = cv2.cvtColor(img_color_np, cv2.COLOR_RGB2BGR)
-
-    # 💡 將要餵給 AI 預測的底圖，強制轉為灰階 (L)，再轉回 3 通道 (RGB) 讓 ResNet 接受
     img_bw = img.convert('L').convert('RGB')
-    img_np = np.array(img_bw) # 接下來所有的 patches 都會從這張乾淨的黑白圖去切！
+    img_np = np.array(img_bw)
     h, w, _ = img_np.shape
 
     num_patches = 32
     crop_h, crop_w = int(h * 0.8), int(w * 0.8)
+    patches, patch_coords = [], []
 
-    patches = []
-    patch_coords = []
     for _ in range(num_patches):
         top = random.randint(0, h - crop_h)
         left = random.randint(0, w - crop_w)
-
-        patch_coords.append({
-            "top": top,
-            "left": left,
-            "bottom": top + crop_h,
-            "right": left + crop_w
-        })
-
+        patch_coords.append({"top": top, "left": left, "bottom": top + crop_h, "right": left + crop_w})
         patch_arr = img_np[top:top+crop_h, left:left+crop_w]
         patches.append(Image.fromarray(patch_arr))
 
     batch_tensors = torch.stack([transform(p) for p in patches]).to(device)
     params_tensor = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]] * num_patches, dtype=torch.float32).to(device)
 
-    model.eval()
     with torch.no_grad():
-        preds = model(batch_tensors, params_tensor).cpu().numpy().flatten()
+        preds = target_model(batch_tensors, params_tensor).cpu().numpy().flatten()
 
-    # ==========================================
-    # 🚨 終極修正：色彩變異度 + 邊緣紋理 雙重防禦
-    # ==========================================
-    # 1. 第一道鎖：計算色彩空間變化度 (擋下彩色/複雜照片)
-    std_r = np.std(img_np[:, :, 0])
-    std_g = np.std(img_np[:, :, 1])
-    std_b = np.std(img_np[:, :, 2])
-    color_std_score = float((std_r + std_g + std_b) / 3.0)
-
-    # 2. 第二道鎖：計算邊緣紋理銳利度 (擋下白板、模糊截圖、平滑影像)
-    # 先將圖片轉為灰階
+    color_std_score = float((np.std(img_np[:, :, 0]) + np.std(img_np[:, :, 1]) + np.std(img_np[:, :, 2])) / 3.0)
     gray_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    # 使用 Laplacian 運算子計算梯度的變異數 (數值越高代表邊緣紋理越強烈)
     edge_score = float(cv2.Laplacian(gray_img, cv2.CV_64F).var())
-
-    # 綜合判定：
-    # 條件 A：色彩變異太大 (> 54.0) -> 不是金屬 (可能是貓咪或風景)
-    # 條件 B：邊緣紋理太少 (< 100.0，數值可依你的顯微鏡照片微調) -> 不是金屬 (可能是白板或平滑截圖)
     is_anomaly = bool(color_std_score > 54.0 or edge_score < 20.0)
-
-    # 將這兩個數值傳給前端，方便監控
-    preds_std = color_std_score
-    preds_edge = edge_score  # 記得在前端把它印出來觀察！
-    # ==========================================
 
     preds_with_coords = list(zip(preds, patch_coords))
     preds_sorted_with_coords = sorted(preds_with_coords, key=lambda x: x[0])
-
     preds_sorted = [x[0] for x in preds_sorted_with_coords]
+
     trim_count = int(num_patches * 0.15)
     valid_preds = preds_sorted[trim_count:-trim_count] if trim_count > 0 else preds_sorted
-
     final_ra = float(np.mean(valid_preds))
 
     detailed_patches = []
     for i, (val, coords) in enumerate(preds_sorted_with_coords):
-        if i < trim_count:
-            status = "剔除 (異常低值)"
-        elif i >= len(preds_sorted_with_coords) - trim_count:
-            status = "剔除 (異常高值/可能含灰塵)"
-        else:
-            status = "保留 (有效計算區間)"
-
-        detailed_patches.append({
-            "id": i + 1,
-            "ra": float(val),
-            "status": status,
-            "coords": coords
-        })
+        if i < trim_count: status = "剔除 (異常低值)"
+        elif i >= len(preds_sorted_with_coords) - trim_count: status = "剔除 (異常高值)"
+        else: status = "保留"
+        detailed_patches.append({"id": i + 1, "ra": float(val), "status": status, "coords": coords})
 
     result = {
         "ra": final_ra,
         "used_default_params": used_default,
         "is_anomaly": is_anomaly,
-        "preds_std": preds_std,        # ✅ 修正：改用正確的色彩變異數變數
-        "preds_edge": preds_edge,      # ✅ 順手補上：把 Laplacian 紋理邊緣分數也傳給前端！
+        "preds_std": color_std_score,
+        "preds_edge": edge_score,
+        "detected_milling": final_milling_type,
         "xai_details": {
             "num_patches": num_patches,
             "trim_count": trim_count,
             "patches_info": detailed_patches
         }
     }
-    #=======================================
-    # 🎨 保持 Grad-CAM 視覺化支援 (使用整張全圖)
-    # ==========================================
-    if gradcam:
-        try:
-            # 針對 Grad-CAM 依然使用完整的圖片進行全域熱力圖分析
-            x_whole = transform(img).unsqueeze(0).to(device)
-            x_whole.requires_grad_(True)
-            params_whole = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]], dtype=torch.float32).to(device)
-
-            heatmap_b64 = compute_gradcam(model, x_whole, params_whole, img)
-            result['heatmap'] = heatmap_b64
-        except Exception as e:
-            result['heatmap_error'] = str(e)
 
     try:
         fn = getattr(file, 'filename', f'upload_{int(time.time())}')
@@ -258,76 +255,54 @@ async def predict(
     return result
 
 # ==========================================
-# 🎨 4. Grad-CAM 運算與其他工具
+# 🛠️ 4. 訓練 API 升級 (附帶強制卸載防護)
 # ==========================================
-def find_last_conv(module):
-    last = None
-    for name, m in module.named_modules():
-        if isinstance(m, torch.nn.Conv2d):
-            last = m
-    return last
+def run_training_script(milling_type: str):
+    """這支函式會在背景獨立執行"""
+    unload_models_to_free_vram()
 
-def compute_gradcam(model, input_tensor, params_tensor, orig_img, target_layer=None):
-    model.zero_grad()
-    if target_layer is None:
-        target_layer = find_last_conv(model)
-    if target_layer is None:
-        raise RuntimeError('No conv layer found for Grad-CAM')
+    try:
+        from datetime import datetime
+        python_exe = sys.executable
 
-    activations = None
-    gradients = None
+        script_dataset = os.path.join(BASE_DIR, "scripts", "dataset_prepare.py")
 
-    def forward_hook(module, inp, out):
-        nonlocal activations
-        activations = out.detach()
+        # 💡 核心修改：判斷要呼叫哪一支訓練腳本
+        if milling_type == "Classifier":
+            script_train = os.path.join(BASE_DIR, "scripts", "train_classifier.py")
+        else:
+            script_train = os.path.join(BASE_DIR, "scripts", "train_model.py")
 
-    def backward_hook(module, grad_in, grad_out):
-        nonlocal gradients
-        gradients = grad_out[0].detach()
+        log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
+        os.makedirs(log_dir, exist_ok=True)
+        time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        logfile = os.path.join(log_dir, f'train_{milling_type}_{time_str}.log')
 
-    fh = target_layer.register_forward_hook(forward_hook)
-    # 💡 加上 _full_ 以符合 PyTorch 最新規範，消除警告
-    bh = target_layer.register_full_backward_hook(backward_hook)
+        custom_env = os.environ.copy()
+        custom_env["PYTHONIOENCODING"] = "utf-8"
 
-    # 必須同時傳入影像與參數
-    output = model(input_tensor, params_tensor)
-    if isinstance(output, torch.Tensor):
-        score = output.squeeze()
-        if score.dim() > 0:
-            score = score.mean()
-    else:
-        score = torch.tensor(float(output))
+        with open(logfile, 'wb') as f:
+            f.write(f"🚀 開始為【{milling_type}】準備資料庫...\n".encode('utf-8'))
+            subprocess.run([python_exe, script_dataset], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
 
-    score.backward(retain_graph=True)
-    fh.remove()
-    bh.remove()
+            f.write(f"\n🚀 啟動【{milling_type}】神經網路訓練...\n".encode('utf-8'))
 
-    if activations is None or gradients is None:
-        raise RuntimeError('Failed to get activations or gradients')
+            # 💡 核心修改：分類器不需要後面的參數，專家大腦才需要
+            if milling_type == "Classifier":
+                subprocess.Popen([python_exe, script_train], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
+            else:
+                subprocess.Popen([python_exe, script_train, "--milling_type", milling_type], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
 
-    weights = gradients.mean(dim=(2, 3), keepdim=True)
-    cam = (weights * activations).sum(dim=1, keepdim=True)
-    cam = torch.nn.functional.relu(cam)
-    cam = cam.squeeze().cpu().numpy()
+    except Exception as e:
+        print(f"❌ [背景任務] 訓練發生錯誤: {str(e)}")
 
-    cam = cam - cam.min()
-    if cam.max() != 0:
-        cam = cam / cam.max()
+@app.post("/train")
+async def start_training(milling_type: str = Query(...), background_tasks: BackgroundTasks = BackgroundTasks(), user: str = Depends(admin_auth)):
+    if milling_type not in ["End_Milling", "Peripheral_Milling", "Classifier"]:
+        return JSONResponse({"error": "未知的訓練類型"}, status_code=400)
 
-    cam_img = np.uint8(255 * cam)
-    cam_img = Image.fromarray(cam_img).resize(orig_img.size, resample=Image.BILINEAR)
-    cam_arr = np.array(cam_img) / 255.0
-
-    cmap = plt.get_cmap('jet')
-    colored = cmap(cam_arr)[:, :, :3]
-    colored = np.uint8(255 * colored)
-    orig_arr = np.array(orig_img).astype(np.uint8)
-    overlay = (0.5 * orig_arr + 0.5 * colored).astype(np.uint8)
-
-    buf = io.BytesIO()
-    Image.fromarray(overlay).save(buf, format='PNG')
-    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
-    return f"data:image/png;base64,{b64}"
+    background_tasks.add_task(run_training_script, milling_type)
+    return {"message": f"✅ 【{milling_type}】訓練排程已在背景啟動！已自動釋放記憶體，請至 Train Logs 查看進度。"}
 
 def log_prediction(filename: str, ra: float):
     try:
@@ -336,84 +311,28 @@ def log_prediction(filename: str, ra: float):
         import csv
         with open(log_file, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            if header:
-                writer.writerow(['timestamp', 'file', 'ra'])
+            if header: writer.writerow(['timestamp', 'file', 'ra'])
             writer.writerow([int(time.time()), filename, ra])
     except Exception:
         pass
 
-# ==========================================
-# 其餘 MLOps API (未更動，為節省版面省略實作內部，但請保留你原本後面的那些 router)
-# ==========================================
-@app.post("/retrain")
-async def retrain(background_tasks: BackgroundTasks, token: str = Query(None), user: str = Depends(admin_auth)):
-    def run_train():
-        try:
-            import sys
-            from datetime import datetime # 引入日期套件
-
-            train_script = os.path.join(BASE_DIR, 'scripts', 'train_model.py')
-            csv_script = os.path.join(BASE_DIR, 'scripts', 'dataset_prepare.py')
-
-            log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
-            os.makedirs(log_dir, exist_ok=True)
-
-            # 💡 核心修改：改用 YYYYMMDD_HHMMSS 作為檔名，告別醜陋的數字串！
-            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            logfile = os.path.join(log_dir, f'train_{time_str}.log')
-            out_model = os.path.join(MODELS_DIR, f'model_{time_str}.pth')
-
-            custom_env = os.environ.copy()
-            custom_env["PYTHONIOENCODING"] = "utf-8"
-
-            if os.path.exists(train_script):
-                print(f"🚀 開始執行背景任務，日誌將輸出至: {logfile}")
-                with open(logfile, 'wb') as f:
-                    if os.path.exists(csv_script):
-                        f.write("🔄 正在執行自動化資料管線 (重新生成 CSV)...\n".encode('utf-8'))
-                        subprocess.run([sys.executable, csv_script], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
-                        f.write("\n".encode('utf-8'))
-
-                    f.write("🚀 開始執行神經網路模型訓練...\n".encode('utf-8'))
-                    subprocess.Popen(
-                        [sys.executable, train_script, "--output", out_model, "--log", logfile],
-                        cwd=BASE_DIR,
-                        stdout=f,
-                        stderr=subprocess.STDOUT,
-                        env=custom_env
-                    )
-            else:
-                print(f"❌ 找不到訓練腳本：{train_script}")
-        except Exception as e:
-            print(f"❌ 背景任務啟動失敗：{str(e)}")
-
-    background_tasks.add_task(run_train)
-    return {"status": "retraining started, CSV will be auto-generated"}
-
 @app.post('/login')
 async def login(username: str = Query(...), password: str = Query(...)):
-    if verify_credentials(username, password):
-        tok = create_token(username)
-        return {"access_token": tok}
+    if verify_credentials(username, password): return {"access_token": create_token(username)}
     return JSONResponse({"error": "invalid credentials"}, status_code=401)
 
 @app.get('/train_logs')
 async def list_train_logs(user: str = Depends(admin_auth)):
     log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
-    if not os.path.exists(log_dir):
-        return {"logs": []}
-    files = sorted(os.listdir(log_dir), reverse=True)
-    return {"logs": files}
+    return {"logs": sorted(os.listdir(log_dir), reverse=True)} if os.path.exists(log_dir) else {"logs": []}
 
 @app.get('/train_logs/{name}')
 async def get_train_log(name: str, user: str = Depends(admin_auth)):
-    log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
-    path = os.path.join(log_dir, name)
-    if not os.path.exists(path):
-        return JSONResponse({"error": "not found"}, status_code=404)
-    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-        return {"log": f.read()}
+    path = os.path.join(BASE_DIR, 'results', 'train_logs', name)
+    if not os.path.exists(path): return JSONResponse({"error": "not found"}, status_code=404)
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f: return {"log": f.read()}
 
+# 💡 補回來的折線圖讀取 API
 @app.get('/train_progress/{name}')
 async def train_progress(name: str, user: str = Depends(admin_auth)):
     log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
@@ -425,86 +344,20 @@ async def train_progress(name: str, user: str = Depends(admin_auth)):
         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(pd.read_json(pd.io.common.StringIO(line), typ='series').to_dict())
+                if not line: continue
+                try: entries.append(pd.read_json(pd.io.common.StringIO(line), typ='series').to_dict())
                 except Exception:
                     try:
                         import json
                         entries.append(json.loads(line))
-                    except Exception:
-                        continue
+                    except Exception: continue
     except Exception:
         return JSONResponse({"error": "read error"}, status_code=500)
     return {"progress": entries}
 
-@app.get('/models')
-async def list_models():
-    files = sorted(os.listdir(MODELS_DIR), reverse=True)
-    models = []
-    for fn in files:
-        if not fn.lower().endswith('.pth'):
-            continue
-        p = os.path.join(MODELS_DIR, fn)
-        stat = os.path.getmtime(p)
-        models.append({"file": fn, "mtime": stat})
-    return {"models": models}
-
-@app.get('/predictions/stats')
-async def prediction_stats(user: str = Depends(admin_auth)):
-    log_file = os.path.join(BASE_DIR, 'results', 'predictions.csv')
-    if not os.path.exists(log_file):
-        return {"total": 0, "last": []}
-    import csv
-    rows = []
-    try:
-        with open(log_file, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                rows.append(r)
-    except Exception:
-        return {"total": 0, "last": []}
-    return {"total": len(rows), "last": rows[-20:]}
-
-@app.post('/predict_batch')
-async def predict_batch(file: UploadFile = File(...), user: str = Depends(admin_auth)):
-    return JSONResponse({"error": "batch predict needs to be updated for dual inputs"}, status_code=501)
-
-@app.post('/report_true')
-async def report_true(filename: str = Query(...), ra: float = Query(...), user: str = Depends(admin_auth)):
-    label_file = os.path.join(BASE_DIR, 'data', 'label_data.csv')
-    os.makedirs(os.path.dirname(label_file), exist_ok=True)
-    header = not os.path.exists(label_file)
-    df = pd.DataFrame([{'file': filename, 'ra': ra}])
-    df.to_csv(label_file, mode='a', header=header, index=False)
-    return {"status": "ok"}
-
 @app.get('/admin/stats')
 async def admin_stats(user: str = Depends(admin_auth)):
-    cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory()._asdict()
-    gpu = {'available': torch.cuda.is_available()}
-    return {"cpu": cpu, "mem": mem, "gpu": gpu}
-
-@app.post('/admin/set_active_model')
-async def set_active_model(model_file: str = Query(...), user: str = Depends(admin_auth)):
-    try:
-        target_path = os.path.join(MODELS_DIR, model_file)
-        if not os.path.exists(target_path):
-            return JSONResponse({"error": "找不到該模型檔案"}, status_code=404)
-
-        # 複製選定的歷史模型，覆蓋掉 current_model.pth
-        shutil.copy(target_path, ACTIVE_MODEL_LINK)
-
-        # 強制後端清空記憶，重新載入新模型
-        global model
-        model = None
-        load_model()
-
-        return {"status": "ok", "msg": f"✅ 系統已成功切換至模型：{model_file}"}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    return {"cpu": psutil.cpu_percent(interval=0.5), "mem": psutil.virtual_memory()._asdict(), "gpu": {'available': torch.cuda.is_available()}}
 
 if __name__ == '__main__':
     uvicorn.run('webapp.app.main:app', host='0.0.0.0', port=2578, reload=False)

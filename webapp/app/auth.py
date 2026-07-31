@@ -20,7 +20,9 @@ USERS = {
     }
 }
 
-security = HTTPBearer()
+# 💡 核心修改 1：設定 auto_error=False
+# 讓 FastAPI 不要在缺少 Header 時直接封殺，而是放行給下方的函式自行判斷
+security = HTTPBearer(auto_error=False)
 
 def create_token(username: str, expires_in: int = 3600):
     payload = {"sub": username, "exp": int(time.time() + expires_in)}
@@ -34,6 +36,10 @@ def verify_token(token: str) -> Optional[str]:
         return None
 
 def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)):
+    # 💡 核心修改 2：防止 creds 為空時引發 AttributeError
+    if not creds or not creds.credentials:
+        raise HTTPException(status_code=401, detail='Invalid token')
+
     token = creds.credentials
     user = verify_token(token)
     if not user:
@@ -54,12 +60,14 @@ def verify_credentials(username: str, password: str) -> bool:
 
 
 def admin_auth(creds: HTTPAuthorizationCredentials = Depends(security), token: str = None):
-    # Try Authorization header first
-    if creds:
+    # 💡 核心修改 3：先安全檢查 creds 是否存在，再驗證 Header
+    if creds and creds.credentials:
         user = verify_token(creds.credentials)
         if user:
             return user
-    # Fallback to query token (legacy)
+
+    # Fallback to query token (legacy / 給 Streamlit 內部 API 呼叫使用)[cite: 3]
     if token and token == 'admin-token':
         return 'admin'
+
     raise HTTPException(status_code=401, detail='Unauthorized')

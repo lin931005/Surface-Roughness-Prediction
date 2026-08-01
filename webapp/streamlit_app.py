@@ -18,16 +18,16 @@ API_URL = "http://127.0.0.1:2578"
 # ==========================================
 # 🎨 網頁基礎與標題設定
 # ==========================================
-st.set_page_config(page_title='CNC 表面粗糙度預測系統', page_icon="⚙️", layout='wide')
+st.set_page_config(page_title='CNC 表面粗糙度自動化檢測系統', page_icon="⚙️", layout='wide')
 
-st.title('🚀 CNC 加工表面粗糙度 AI 預測與驗證系統')
-st.markdown("本系統採用 **ResNet-50 雙專家深度學習架構**，提供高精準度 Ra 值預測與批量驗證分析。")
+st.title('🚀 CNC 加工表面粗糙度自動化檢測系統')
+st.markdown("本系統採用 **ResNet-50 雙通道深度學習架構**，提供高精準度 Ra 值自動估算與批量驗證分析。")
 
-# 💡 側邊欄新增「批量驗證分頁」
-tab = st.sidebar.radio('切換操作模式', [
-    '👨‍🔧 一般使用者 (單張檢測)',
+# 💡 側邊欄切換操作模式
+tab = st.sidebar.radio('切換操作環境', [
+    '👨‍🔧 單筆影像檢測作業',
     '🧪 批量驗證與精度分析 (Batch Evaluation)',
-    '👑 系統管理員'
+    '👑 系統管理與模型控制台'
 ])
 
 # ==========================================
@@ -57,13 +57,13 @@ def parse_filename_gt(filename: str):
 # ==========================================
 # 👨‍🔧 模式 A：單張檢測
 # ==========================================
-if tab == '👨‍🔧 一般使用者 (單張檢測)':
-    st.info("💡 **操作說明**：請上傳工件照片。系統將自動辨識加工法，您也可以手動指定以獲得最高精準度。")
+if tab == '👨‍🔧 單筆影像檢測作業':
+    st.info("💡 **操作說明**：請上傳工件表面影像。系統將自動辨識銑削方式，亦可手動覆寫參數以提升分析精度。")
 
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
         milling_type_selection = st.selectbox(
-            "選擇加工法 (預設 AI 自動辨識)",
+            "設定銑削加工法 (預設: 自動特徵辨識)",
             ("自動辨識 (Auto)", "立銑 (End Milling)", "直銑(躺銑) (Peripheral Milling)")
         )
     with col_opt2:
@@ -84,9 +84,9 @@ if tab == '👨‍🔧 一般使用者 (單張檢測)':
 
     if uploaded is not None:
         img = Image.open(uploaded).convert('RGB')
-        st.image(img, caption='您上傳的待測影像', width=400)
+        st.image(img, caption='待測工件影像', width=400)
 
-        use_gc = st.checkbox('顯示 AI 視覺熱力圖 (Grad-CAM)', value=True)
+        use_gc = st.checkbox('顯示 Grad-CAM 特徵啟動熱力圖', value=True)
 
         if 'force_override' not in st.session_state: st.session_state['force_override'] = False
         if 'do_predict' not in st.session_state: st.session_state['do_predict'] = False
@@ -103,7 +103,7 @@ if tab == '👨‍🔧 一般使用者 (單張檢測)':
         def trigger_next_meme():
             st.session_state['do_predict'] = True
 
-        predict_btn = st.button('🔮 開始 AI 預測', use_container_width=True)
+        predict_btn = st.button('⚙️ 執行粗糙度 (Ra) 分析', use_container_width=True)
 
         if predict_btn or st.session_state['do_predict']:
             st.session_state['do_predict'] = False
@@ -113,15 +113,15 @@ if tab == '👨‍🔧 一般使用者 (單張檢測)':
             if use_gc: params['gradcam'] = 'true'
             if has_params: params['speed'] = speed_rpm
 
-            with st.spinner('神經網路高速推論中...'):
+            with st.spinner('影像特徵萃取與數值運算中...'):
                 try:
                     r = requests.post(f'{API_URL}/predict', files=files, params=params, timeout=30)
                     if r.status_code == 200:
                         j = r.json()
                         if 'error' in j:
-                            st.error(f"預測失敗：{j['error']}")
+                            st.error(f"分析失敗：{j['error']}")
                         else:
-                            # 💡 1. 統一在這裡把所有變數抓出來，確保後面絕對不會找不到！
+                            # 💡 1. 抓取所有變數
                             ai_conf = j.get('ai_confidence', 1.0) * 100
                             preds_std = j.get('preds_std', 0.0)
                             preds_edge = j.get('preds_edge', 0.0)
@@ -129,13 +129,13 @@ if tab == '👨‍🔧 一般使用者 (單張檢測)':
                             # 🛡️ 2. 異常防禦機制
                             if j.get('is_anomaly'):
                                 if not st.session_state['force_override']:
-                                    st.error(f"🚨 **異常影像警告：拒絕執行分析**")
+                                    st.error(f"🚨 **資料驗證失敗：已中止分析流程**")
 
-                                    # 智慧判斷攔截原因
+                                    # 專業判斷攔截原因
                                     if ai_conf == 0.0:
-                                        st.warning("🚨 **系統偵測到非金屬影像！** AI 判定此照片無銑削特徵 (歸類為: Other)，防禦機制已強制攔截。")
+                                        st.warning("🚨 **影像特徵不符警告：** 系統判定此影像缺乏有效之金屬切削紋理 (分類標籤: OOD/其他)，已中斷粗糙度分析流程以確保數據可靠性。")
                                     elif ai_conf < 85.0:
-                                        st.warning(f"🚨 **系統偵測到模糊或異常影像！** AI 對此照片的辨識自信度僅有 **{ai_conf:.1f}%** (低於 85%)，拒絕執行分析。")
+                                        st.warning(f"🚨 **影像品質警告：** 系統對此影像之特徵辨識度偏低 (置信度 {ai_conf:.1f}%)。可能原因為對焦模糊或非標準切削表面，分析已中斷。")
 
                                     # 迷因圖防呆
                                     meme_folder = os.path.join("data", "Utfg2026")
@@ -149,35 +149,34 @@ if tab == '👨‍🔧 一般使用者 (單張檢測)':
 
                                             current_meme = st.session_state['meme_playlist'].pop(0)
                                             st.image(os.path.join(meme_folder, current_meme))
-                                            st.markdown("<h4 style='text-align: center; color: #ff4b4b;'>您的照片似乎不符合標準，請參考上方照片(並沒有)</h4>", unsafe_allow_html=True)
-                                            st.button("🔄 換一張參考照片", on_click=trigger_next_meme)
-                                    st.button("真的是切削照片嗎?", on_click=trigger_override)
+                                            st.markdown("<h4 style='text-align: center; color: #ff4b4b;'>⚠️ 系統已中斷非標準影像之分析<br>（以上為參考圖片）</h4>", unsafe_allow_html=True)
+                                            st.button("🔄 載入其他參考範例", on_click=trigger_next_meme)
+                                    st.button("⚠️ 強制忽略警告並執行分析", on_click=trigger_override)
                                     st.stop()
                                 else:
-                                    st.success("好吧 我相信你... 系統已解除防禦，強制執行粗糙度檢測。")
+                                    st.success("⚠️ 提示：已手動覆寫安全攔截設定，強制執行特徵數值分析。")
 
                             # ============ 3. 正常預測結果顯示 ============
                             detected_type = j.get('detected_milling')
                             display_type = "立銑 (End Milling)" if detected_type == "End_Milling" else "直銑 (躺銑) (Peripheral Milling)"
 
-                            st.success(f"### ✨ 預測表面粗糙度 (Ra): **{j.get('ra'):.4f} μm**")
-                            st.info(f"🧠 本次推論啟用的專家大腦：**{display_type} 模型**")
+                            st.success(f"### ✨ 表面粗糙度估算值 (Ra): **{j.get('ra'):.4f} μm**")
+                            st.info(f"⚙️ 系統當前調用之特徵萃取模型：**{display_type}**")
 
-                            st.markdown("#### 🔬 AI 視覺預處理可視化")
+                            st.markdown("#### 🔬 影像預處理與特徵萃取可視化")
                             col_orig, col_bw = st.columns(2)
                             with col_orig: st.image(img, caption='1. 原始彩色輸入', width='stretch')
-                            with col_bw: st.image(img.convert('L'), caption='2. 濾除色彩雜訊 (AI 實際分析之特徵)', width='stretch')
+                            with col_bw: st.image(img.convert('L'), caption='2. 灰階紋理強化 (演算法分析特徵)', width='stretch')
 
-                            # 💡 乾淨的系統狀態面板 (安全使用一開始定義好的變數)
-                            st.info(f"📊 **系統狀態面板**：AI 自信度: **{ai_conf:.1f}%** | Color Std: **{preds_std:.2f}** | Laplacian: **{preds_edge:.2f}**")
+                            st.info(f"📊 **系統狀態面板**：特徵置信度 (Confidence): **{ai_conf:.1f}%**")
 
-                            if j.get('heatmap'): st.image(j.get('heatmap'), caption='Grad-CAM 刀痕解析熱力圖', width='stretch')
+                            if j.get('heatmap'): st.image(j.get('heatmap'), caption='Grad-CAM 表面紋理熱力圖', width='stretch')
 
                             if 'xai_details' in j:
                                 details = j['xai_details']
                                 patches_info = details['patches_info']
                                 st.markdown("---")
-                                st.markdown("### 📊 AI 決策深度解析 (XAI) 檢測報告")
+                                st.markdown("### 📊 局部特徵取樣與離群值 (Outlier) 檢測報告")
 
                                 img_with_boxes = img.copy()
                                 draw = ImageDraw.Draw(img_with_boxes)
@@ -196,60 +195,55 @@ if tab == '👨‍🔧 一般使用者 (單張檢測)':
                                     tooltip=['區塊編號', '預測粗糙度 (Ra)', '狀態']
                                 ).properties(height=300).interactive()
                                 st.altair_chart(chart, use_container_width=True)
-                    else: st.error(f"後端報錯 (代碼 {r.status_code})：{r.text}")
+                    else: st.error(f"伺服器回傳異常 (狀態碼 {r.status_code})：{r.text}")
                 except Exception as e: st.error(f"連線失敗：{str(e)}")
 
 # ==========================================
 # 🧪 模式 B：批量驗證與精度分析 (全新大分頁)
 # ==========================================
 elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
-    st.subheader('🧪 批量測試與 AI 模型精準度評估看板')
-    st.info('💡 **使用說明**：請直接全選並拖拽多張測試影像（需包含銑法與 Ra 數值，如：`立銑_7000-7_1.6492.jpg`）。系統將自動解析真實數據，與 AI 預測結果進行比對！')
+    st.subheader('🧪 批量測試與模型精準度評估看板')
+    st.info('💡 **使用說明**：請直接全選並拖拽多張測試影像（需包含銑法與 Ra 數值，如：`立銑_7000-7_1.6492.jpg`）。系統將自動解析真實數據，與預測結果進行比對。')
 
     batch_files = st.file_uploader('📸 批量上傳測試影像 (可按 Ctrl+A 全選上傳)', type=['png','jpg','jpeg'], accept_multiple_files=True)
 
     if batch_files:
         st.success(f"📂 已成功載入 **{len(batch_files)}** 張待測影像！")
 
-        if st.button('🚀 開始批量 AI 推論與精度對照分析', use_container_width=True, type="primary"):
+        if st.button('🚀 執行批量特徵分析與精度對照', use_container_width=True, type="primary"):
             progress_bar = st.progress(0)
             status_text = st.empty()
 
             results = []
 
             for idx, file in enumerate(batch_files):
-                status_text.text(f"⏳ 正在分析第 ({idx+1}/{len(batch_files)}) 張照片：{file.name}...")
+                status_text.text(f"⏳ 運算中：第 ({idx+1}/{len(batch_files)}) 筆影像：{file.name}...")
 
-                # 1. 自動解析檔名 Ground Truth
                 gt_type_code, gt_type_text, gt_ra = parse_filename_gt(file.name)
 
-                # 2. 呼叫 AI API 進行預測
                 files_payload = {'file': (file.name, file.getvalue(), 'image/jpeg')}
-                api_params = {'milling_type': 'Auto'} # 強制交給 AI 分類器自動辨識
+                api_params = {'milling_type': 'Auto'}
 
                 try:
                     r = requests.post(f'{API_URL}/predict', files=files_payload, params=api_params, timeout=15)
                     if r.status_code == 200:
                         j = r.json()
-                        # 💡 補上這一行：從 JSON 中抓出自信度，確保下面的程式碼認識 ai_conf！
                         ai_conf = j.get('ai_confidence', 1.0) * 100
                         pred_type_code = j.get('detected_milling')
                         pred_type_text = "立銑" if pred_type_code == "End_Milling" else "直銑 (躺銑)" if pred_type_code == "Peripheral_Milling" else "未知"
                         pred_ra = j.get('ra')
                         is_anomaly = j.get('is_anomaly', False)
 
-                        # 3. 計算統計比對指標
                         type_correct = (gt_type_code == pred_type_code) if gt_type_code else None
 
-                        # 💡 確保變數不是 None 才能做數學計算
                         abs_err = abs(pred_ra - gt_ra) if (pred_ra is not None and gt_ra is not None) else None
                         pct_err = (abs_err / gt_ra * 100.0) if (abs_err is not None and gt_ra) else None
 
                         results.append({
                             "圖片檔名": file.name,
                             "真實銑法": gt_type_text,
-                            "AI 判定銑法": pred_type_text,
-                            "AI 自信度 (%)": round(ai_conf, 1),
+                            "系統判定銑法": pred_type_text,
+                            "特徵置信度 (%)": round(ai_conf, 1),
                             "銑法辨識": "✅ 正確" if type_correct else "❌ 誤判" if type_correct is False else "❓ 未知",
                             "真實 Ra (μm)": round(gt_ra, 4) if gt_ra is not None else np.nan,
                             "預測 Ra (μm)": round(pred_ra, 4) if pred_ra is not None else np.nan,
@@ -260,7 +254,6 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
                     else:
                         results.append({"圖片檔名": file.name, "影像狀態": f"❌ API 錯誤 ({r.status_code})"})
                 except Exception as e:
-                    # 💡 將真實的 Python 錯誤名稱印出來，方便以後除錯
                     results.append({"圖片檔名": file.name, "影像狀態": f"❌ 錯誤: {type(e).__name__}"})
 
                 progress_bar.progress((idx + 1) / len(batch_files))
@@ -273,17 +266,15 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             # 📊 第一區塊：核心 KPI 指標統計儀表板
             # ==========================================
             st.markdown("---")
-            st.markdown("### 🎯 模型綜合效能 KPI 統計")
+            st.markdown("### 🎯 系統綜合效能 KPI 統計")
 
-            # 💡 防呆機制：確保欄位真的存在，避免全數預測失敗時導致系統崩潰
             if '真實 Ra (μm)' in df_res.columns and '預測 Ra (μm)' in df_res.columns:
                 valid_df = df_res.dropna(subset=['真實 Ra (μm)', '預測 Ra (μm)'])
             else:
-                valid_df = pd.DataFrame() # 如果欄位不存在，直接給一個空表格
+                valid_df = pd.DataFrame()
 
             c1, c2, c3, c4 = st.columns(4)
 
-            # 1. 銑法分類正確率 (加上欄位檢查防呆)
             if '銑法辨識' in df_res.columns:
                 type_checked = df_res[df_res['銑法辨識'] != "❓ 未知"]
                 acc = (type_checked['銑法辨識'] == "✅ 正確").mean() * 100 if not type_checked.empty else 0.0
@@ -291,19 +282,16 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             else:
                 c1.metric("👁️ 銑法辨識正確率", "N/A")
 
-            # 2. 平均絕對誤差 MAE
             mae = valid_df['絕對誤差 (μm)'].mean() if not valid_df.empty else 0.0
             c2.metric("📏 平均絕對誤差 (MAE)", f"{mae:.4f} μm")
 
-            # 3. 平均相對偏差率 MAPE
             mape = valid_df['偏差率 (%)'].mean() if not valid_df.empty else 0.0
             c3.metric("📉 平均相對偏差率 (MAPE)", f"{mape:.2f} %")
 
-            # 4. 總測試張數
             c4.metric("📸 測試影像總數", f"{len(df_res)} 張")
 
             # ==========================================
-            # 📈 第二區塊：視覺化圖表分析 (一眼看懂擬合度與誤差)
+            # 📈 第二區塊：視覺化圖表分析
             # ==========================================
             st.markdown("---")
             st.markdown("### 📈 預測結果圖表分析")
@@ -313,14 +301,12 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             with col_chart1:
                 st.markdown("**1. 真實 Ra vs 預測 Ra 擬合散佈圖 (越接近紅線越準確)**")
                 if not valid_df.empty:
-                    # 散佈點
                     scatter = alt.Chart(valid_df).mark_circle(size=80).encode(
                         x=alt.X('真實 Ra (μm)', scale=alt.Scale(zero=False)),
                         y=alt.Y('預測 Ra (μm)', scale=alt.Scale(zero=False)),
                         color=alt.Color('銑法辨識', scale=alt.Scale(domain=['✅ 正確', '❌ 誤判'], range=['#28a745', '#dc3545'])),
-                        tooltip=['圖片檔名', '真實銑法', 'AI 判定銑法', '真實 Ra (μm)', '預測 Ra (μm)', '偏差率 (%)']
+                        tooltip=['圖片檔名', '真實銑法', '系統判定銑法', '真實 Ra (μm)', '預測 Ra (μm)', '偏差率 (%)']
                     )
-                    # 1:1 理想參考線
                     min_val = min(valid_df['真實 Ra (μm)'].min(), valid_df['預測 Ra (μm)'].min())
                     max_val = max(valid_df['真實 Ra (μm)'].max(), valid_df['預測 Ra (μm)'].max())
                     line_df = pd.DataFrame({'x': [min_val, max_val], 'y': [min_val, max_val]})
@@ -336,8 +322,8 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
                         y=alt.Y('偏差率 (%)', title="偏差率 (%)"),
                         color=alt.condition(
                             alt.datum['偏差率 (%)'] < 10.0,
-                            alt.value('#28a745'), # 誤差 < 10% 顯示綠色
-                            alt.value('#dc3545')  # 誤差 > 10% 顯示紅色
+                            alt.value('#28a745'),
+                            alt.value('#dc3545')
                         ),
                         tooltip=['圖片檔名', '真實 Ra (μm)', '預測 Ra (μm)', '偏差率 (%)']
                     ).properties(height=350)
@@ -364,7 +350,7 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
 else:
     BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
-    st.subheader('👑 MLOps 系統管理員專業中控台')
+    st.subheader('👑 系統管理與模型控制台')
 
     if 'token' not in st.session_state: st.session_state['token'] = ''
 
@@ -387,26 +373,26 @@ else:
         headers = {'Authorization': f'Bearer {token}'}
 
         tab_train, tab_model, tab_data, tab_history, tab_stats = st.tabs([
-            "🚀 訓練與終端機", "🤖 模型熱切換", "📊 資料集分析", "📜 預測紀錄與校正", "🖥️ 硬體監控"
+            "🚀 訓練與終端機", "🤖 模型熱切換", "📊 資料集分析", "📜 預測紀錄與稽核", "🖥️ 硬體監控"
         ])
 
         with tab_train:
-            st.markdown("#### 🚀 啟動模型訓練管線")
+            st.markdown("#### 🚀 啟動模型訓練管線 (Training Pipeline)")
             col_btn1, col_btn2, col_btn3 = st.columns(3)
             with col_btn1:
-                if st.button("🧠 訓練【立銑】大腦", use_container_width=True, type="primary"):
+                if st.button("⚙️ 啟動【立銑】回歸模型訓練", use_container_width=True, type="primary"):
                     try:
                         res = requests.post(f"{API_URL}/train?milling_type=End_Milling&token=admin-token", headers=headers)
                         st.success(res.json().get("message", "指令發送成功"))
                     except Exception as e: st.error(str(e))
             with col_btn2:
-                if st.button("🧠 訓練【直銑】大腦", use_container_width=True, type="primary"):
+                if st.button("⚙️ 啟動【直銑】回歸模型訓練", use_container_width=True, type="primary"):
                     try:
                         res = requests.post(f"{API_URL}/train?milling_type=Peripheral_Milling&token=admin-token", headers=headers)
                         st.success(res.json().get("message", "指令發送成功"))
                     except Exception as e: st.error(str(e))
             with col_btn3:
-                if st.button("👁️ 訓練【分類器】大腦", use_container_width=True):
+                if st.button("📊 啟動【銑法分類器】模型訓練", use_container_width=True):
                     try:
                         res = requests.post(f"{API_URL}/train?milling_type=Classifier&token=admin-token", headers=headers)
                         st.success(res.json().get("message", "指令發送成功"))
@@ -418,7 +404,7 @@ else:
                 logs = r.json().get('logs', [])
             except Exception: logs = []
 
-            sel = st.selectbox('📡 選擇要監聽的訓練日誌 (Log)', [''] + logs)
+            sel = st.selectbox('📡 選擇要監控的訓練日誌 (Log)', [''] + logs)
 
             if sel:
                 col_ctrl1, col_ctrl2 = st.columns(2)
@@ -490,7 +476,7 @@ else:
                 df_pred = df_pred.sort_values('timestamp', ascending=False).reset_index(drop=True)
                 st.dataframe(df_pred, use_container_width=True)
                 csv = df_pred.to_csv(index=False).encode('utf-8-sig')
-                st.download_button(label="📥 匯出預測紀錄 (CSV)", data=csv, file_name='ai_predictions_log.csv', mime='text/csv')
+                st.download_button(label="📥 匯出預測紀錄 (CSV)", data=csv, file_name='system_predictions_log.csv', mime='text/csv')
 
         with tab_stats:
             st.markdown("#### 🖥️ 伺服器即時狀態")

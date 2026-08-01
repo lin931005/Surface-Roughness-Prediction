@@ -165,12 +165,15 @@ async def predict(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # 💡 修正 1：先把圖片轉黑白，再餵給分類器，與訓練時保持一致！
+    img_bw = img.convert('L').convert('RGB')
+
     final_milling_type = milling_type
     if milling_type == "Auto":
         if classifier_model is not None:
             classifier_model.to(device)
             with torch.no_grad():
-                img_tensor = transform(img).unsqueeze(0).to(device)
+                img_tensor = transform(img_bw).unsqueeze(0).to(device) # ✅ 改用黑白圖片
                 out = classifier_model(img_tensor)
                 pred_class = torch.argmax(out, dim=1).item()
                 final_milling_type = "Peripheral_Milling" if pred_class == 1 else "End_Milling"
@@ -227,9 +230,12 @@ async def predict(
 
     detailed_patches = []
     for i, (val, coords) in enumerate(preds_sorted_with_coords):
-        if i < trim_count: status = "剔除 (異常低值)"
-        elif i >= len(preds_sorted_with_coords) - trim_count: status = "剔除 (異常高值)"
-        else: status = "保留"
+        if i < trim_count:
+            status = "剔除 (異常低值)"
+        elif i >= len(preds_sorted_with_coords) - trim_count:
+            status = "剔除 (異常高值/可能含灰塵)" # ✅ 補回完整字串
+        else:
+            status = "保留 (有效計算區間)" # ✅ 補回完整字串
         detailed_patches.append({"id": i + 1, "ra": float(val), "status": status, "coords": coords})
 
     result = {

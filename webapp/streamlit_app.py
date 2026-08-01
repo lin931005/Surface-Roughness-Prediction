@@ -132,10 +132,10 @@ if tab == '👨‍🔧 一般使用者 (單張檢測)':
                                     st.error(f"🚨 **異常影像警告：拒絕執行分析**")
 
                                     # 智慧判斷攔截原因
-                                    if ai_conf < 85.0:
-                                        st.warning(f"🚨 **系統偵測到異常影像！** AI 對此照片的辨識自信度僅有 **{ai_conf:.1f}%** (低於 85%)，這顯然不是標準的金屬切削照片。")
-                                    else:
-                                        st.warning(f"🚨 **系統偵測到異常影像！** 雖然 AI 自信度高達 {ai_conf:.1f}%，但物理特徵異常 (Color Std: {preds_std:.2f}, Laplacian: {preds_edge:.2f})，被雙重防禦機制攔截。")
+                                    if ai_conf == 0.0:
+                                        st.warning("🚨 **系統偵測到非金屬影像！** AI 判定此照片無銑削特徵 (歸類為: Other)，防禦機制已強制攔截。")
+                                    elif ai_conf < 85.0:
+                                        st.warning(f"🚨 **系統偵測到模糊或異常影像！** AI 對此照片的辨識自信度僅有 **{ai_conf:.1f}%** (低於 85%)，拒絕執行分析。")
 
                                     # 迷因圖防呆
                                     meme_folder = os.path.join("data", "Utfg2026")

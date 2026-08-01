@@ -236,13 +236,12 @@ async def predict(
     with torch.no_grad():
         preds = target_model(batch_tensors, params_tensor).cpu().numpy().flatten()
 
-    # 恢復數學特徵計算 (攔截色彩過於豐富或邊緣不足的圖片)
-    color_std_score = float((np.std(img_np[:, :, 0]) + np.std(img_np[:, :, 1]) + np.std(img_np[:, :, 2])) / 3.0)
-    gray_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    edge_score = float(cv2.Laplacian(gray_img, cv2.CV_64F).var())
+    # 🌟 終極防禦：全面信任三元分類大腦的「Other 攔截」與「85% 自信度門檻」
+    is_anomaly = bool(ai_is_confused)
 
-    # 🛡️ 雙重防禦：色彩太鮮豔 (例如紅藍黃花紋)、沒有金屬紋理，或是 AI 沒自信，全部攔截！
-    is_anomaly = bool(color_std_score > 54.0 or edge_score < 20.0 or ai_is_confused)
+    # 保留這兩行只是為了餵給前端，避免報錯
+    color_std_score = 0.0
+    edge_score = 0.0
 
     preds_with_coords = list(zip(preds, patch_coords))
     preds_sorted_with_coords = sorted(preds_with_coords, key=lambda x: x[0])

@@ -55,22 +55,35 @@ def generate_manifest():
                 path_parts = rel_path.split(os.sep)
 
                 # 期待結構: Machining_Type / Speed / Condition / img.jpg
-                if len(path_parts) >= 4:
-                    machining_type = path_parts[0]  # End_Milling 或 Peripheral_Milling
-                    speed_str = path_parts[1]
-                    condition_id = path_parts[2]
+                # 注意：Other 資料夾可能沒有這麼深，所以要另外寫判斷
+                if len(path_parts) >= 1:
+                    machining_type = path_parts[0]  # End_Milling, Peripheral_Milling 或 Other
 
-                    # 去字典裡查 Ra 值
-                    if machining_type in ra_dict and condition_id in ra_dict[machining_type]:
-                        ra_val = ra_dict[machining_type][condition_id]
-
+                    # 💡 解法：如果資料夾是 Other，就無條件收編，不需要查字典！
+                    if machining_type == "Other":
                         all_data_rows.append({
                             "image_path": abs_path,
-                            "machining_type": machining_type,
-                            "speed": float(speed_str),
-                            "condition_id": condition_id, # 存成字串以防有 7000-0.5 這種小數點編號
-                            "ra_target": float(ra_val)
+                            "machining_type": "Other",
+                            "speed": 0.0,
+                            "condition_id": "N/A",
+                            "ra_target": 0.0
                         })
+
+                    # 正常的立銑與直銑，才去檢查深層資料夾並查字典
+                    elif len(path_parts) >= 4:
+                        speed_str = path_parts[1]
+                        condition_id = path_parts[2]
+
+                        if machining_type in ra_dict and condition_id in ra_dict[machining_type]:
+                            ra_val = ra_dict[machining_type][condition_id]
+
+                            all_data_rows.append({
+                                "image_path": abs_path,
+                                "machining_type": machining_type,
+                                "speed": float(speed_str),
+                                "condition_id": condition_id,
+                                "ra_target": float(ra_val)
+                            })
 
     dataset_df = pd.DataFrame(all_data_rows)
 

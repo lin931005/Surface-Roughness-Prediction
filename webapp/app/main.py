@@ -70,7 +70,8 @@ class ClassifierModel(nn.Module):
         super(ClassifierModel, self).__init__()
         self.resnet = models.resnet18(weights=None)
         num_ftrs = self.resnet.fc.in_features
-        self.resnet.fc = nn.Linear(num_ftrs, 2)
+        # 💡 這裡也要改成 3！
+        self.resnet.fc = nn.Linear(num_ftrs, 3)
 
     def forward(self, img):
         return self.resnet(img)
@@ -165,18 +166,38 @@ async def predict(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 💡 修正 1：先把圖片轉黑白，再餵給分類器，與訓練時保持一致！
+    # 💡 1. 決定最終要用的 milling_type (加入 AI 自信度偵測)
     img_bw = img.convert('L').convert('RGB')
+
+    ai_confidence = 1.0      # 初始化自信度
+    ai_is_confused = False   # 初始化困惑狀態
 
     final_milling_type = milling_type
     if milling_type == "Auto":
         if classifier_model is not None:
             classifier_model.to(device)
             with torch.no_grad():
-                img_tensor = transform(img_bw).unsqueeze(0).to(device) # ✅ 改用黑白圖片
+                img_tensor = transform(img_bw).unsqueeze(0).to(device)
                 out = classifier_model(img_tensor)
+
+                probs = torch.nn.functional.softmax(out, dim=1)
+                max_prob = torch.max(probs).item()
                 pred_class = torch.argmax(out, dim=1).item()
-                final_milling_type = "Peripheral_Milling" if pred_class == 1 else "End_Milling"
+
+                # 🌟 攔截邏輯升級：
+                if pred_class == 2:
+                    # 如果 AI 判定這是一張「Other (垃圾桶)」的照片
+                    final_milling_type = "End_Milling" # 給個預設值防呆
+                    ai_confidence = 0.0                # 直接把自信度無情歸零！
+                    ai_is_confused = True              # 觸發異常警告
+                else:
+                    # 如果是正常的立銑 (0) 或 直銑 (1)
+                    final_milling_type = "Peripheral_Milling" if pred_class == 1 else "End_Milling"
+                    ai_confidence = max_prob
+
+                    # 依然保留 85% 的防線，防止 AI 遇到模糊金屬時亂猜
+                    if max_prob < 0.85:
+                        ai_is_confused = True
         else:
             final_milling_type = "End_Milling"
 
@@ -215,10 +236,13 @@ async def predict(
     with torch.no_grad():
         preds = target_model(batch_tensors, params_tensor).cpu().numpy().flatten()
 
+    # 恢復數學特徵計算 (攔截色彩過於豐富或邊緣不足的圖片)
     color_std_score = float((np.std(img_np[:, :, 0]) + np.std(img_np[:, :, 1]) + np.std(img_np[:, :, 2])) / 3.0)
     gray_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     edge_score = float(cv2.Laplacian(gray_img, cv2.CV_64F).var())
-    is_anomaly = bool(color_std_score > 54.0 or edge_score < 20.0)
+
+    # 🛡️ 雙重防禦：色彩太鮮豔 (例如紅藍黃花紋)、沒有金屬紋理，或是 AI 沒自信，全部攔截！
+    is_anomaly = bool(color_std_score > 54.0 or edge_score < 20.0 or ai_is_confused)
 
     preds_with_coords = list(zip(preds, patch_coords))
     preds_sorted_with_coords = sorted(preds_with_coords, key=lambda x: x[0])
@@ -233,9 +257,9 @@ async def predict(
         if i < trim_count:
             status = "剔除 (異常低值)"
         elif i >= len(preds_sorted_with_coords) - trim_count:
-            status = "剔除 (異常高值/可能含灰塵)" # ✅ 補回完整字串
+            status = "剔除 (異常高值/可能含灰塵)"
         else:
-            status = "保留 (有效計算區間)" # ✅ 補回完整字串
+            status = "保留 (有效計算區間)"
         detailed_patches.append({"id": i + 1, "ra": float(val), "status": status, "coords": coords})
 
     result = {
@@ -244,6 +268,7 @@ async def predict(
         "is_anomaly": is_anomaly,
         "preds_std": color_std_score,
         "preds_edge": edge_score,
+        "ai_confidence": ai_confidence,  # 💡 修改點 2：把 AI 的自信度數據打包傳給網頁
         "detected_milling": final_milling_type,
         "xai_details": {
             "num_patches": num_patches,

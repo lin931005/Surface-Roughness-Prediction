@@ -58,7 +58,7 @@ class ClassifierDataset(Dataset):
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ])
         # 將字串轉換為數字標籤
-        self.label_map = {"End_Milling": 0, "Peripheral_Milling": 1}
+        self.label_map = {"End_Milling": 0, "Peripheral_Milling": 1, "Other": 2}
 
     def __len__(self):
         return len(self.df) * 2 if self.is_train else len(self.df)
@@ -89,7 +89,7 @@ class ClassifierModel(nn.Module):
         self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         num_ftrs = self.resnet.fc.in_features
         # 輸出 2 個神經元 (立銑與直銑的機率)
-        self.resnet.fc = nn.Linear(num_ftrs, 2)
+        self.resnet.fc = nn.Linear(num_ftrs, 3)
 
     def forward(self, img):
         return self.resnet(img)
@@ -141,7 +141,7 @@ def main():
     train_df = df.iloc[val_size:].reset_index(drop=True)
     val_df = df.iloc[:val_size].reset_index(drop=True)
 
-    print(f"📂 成功載入 {len(df)} 筆影像資料！(包含立銑與直銑)")
+    print(f"📂 成功載入 {len(df)} 筆影像資料！(包含立銑、直銑與 Other 負面教材)")
 
     train_loader = DataLoader(ClassifierDataset(train_df, True), batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     val_loader = DataLoader(ClassifierDataset(val_df, False), batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
@@ -156,7 +156,7 @@ def main():
     epochs_without_improve = 0
     stats = []
 
-    print(f"🔥 開始進行 {EPOCHS} 回合的二元分類訓練！\n" + "-" * 50)
+    print(f"🔥 開始進行 {EPOCHS} 回合的【三元分類】防禦大腦訓練！\n" + "-" * 50)
     for epoch in range(1, EPOCHS + 1):
         model.train()
         train_loss = 0.0
@@ -181,7 +181,7 @@ def main():
 
         import json
         print(json.dumps({'epoch': epoch, 'train_loss': avg_train_loss, 'val_loss': avg_val_loss}))
-        
+
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_without_improve = 0

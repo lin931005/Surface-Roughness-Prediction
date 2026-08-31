@@ -23,10 +23,22 @@ import asyncio
 import gc
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from fastapi import Security, HTTPException, status
+from fastapi.security import APIKeyHeader
 
-from .auth import admin_auth, verify_credentials, create_token
 
 app = FastAPI()
+
+API_SECRET_KEY = "super_secret_cnc_key_2026"
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_api_key(api_key: str = Security(api_key_header)):
+    if api_key != API_SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="拒絕存取：無效的 API 金鑰"
+        )
+    return api_key
 
 # ==========================================
 # 🔍 1. 模型路徑與載入設定 (雙專家 + 分類器)
@@ -327,7 +339,7 @@ def run_training_script(milling_type: str):
         print(f"❌ [背景任務] 訓練發生錯誤: {str(e)}")
 
 @app.post("/train")
-async def start_training(milling_type: str = Query(...), background_tasks: BackgroundTasks = BackgroundTasks(), user: str = Depends(admin_auth)):
+async def start_training(milling_type: str = Query(...), background_tasks: BackgroundTasks = BackgroundTasks(), user: str = Depends(verify_api_key)):
     if milling_type not in ["End_Milling", "Peripheral_Milling", "Classifier"]:
         return JSONResponse({"error": "未知的訓練類型"}, status_code=400)
 
@@ -346,25 +358,20 @@ def log_prediction(filename: str, ra: float):
     except Exception:
         pass
 
-@app.post('/login')
-async def login(username: str = Query(...), password: str = Query(...)):
-    if verify_credentials(username, password): return {"access_token": create_token(username)}
-    return JSONResponse({"error": "invalid credentials"}, status_code=401)
-
 @app.get('/train_logs')
-async def list_train_logs(user: str = Depends(admin_auth)):
+async def list_train_logs(user: str = Depends(verify_api_key)):
     log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
     return {"logs": sorted(os.listdir(log_dir), reverse=True)} if os.path.exists(log_dir) else {"logs": []}
 
 @app.get('/train_logs/{name}')
-async def get_train_log(name: str, user: str = Depends(admin_auth)):
+async def get_train_log(name: str, user: str = Depends(verify_api_key)):
     path = os.path.join(BASE_DIR, 'results', 'train_logs', name)
     if not os.path.exists(path): return JSONResponse({"error": "not found"}, status_code=404)
     with open(path, 'r', encoding='utf-8', errors='ignore') as f: return {"log": f.read()}
 
 # 💡 補回來的折線圖讀取 API
 @app.get('/train_progress/{name}')
-async def train_progress(name: str, user: str = Depends(admin_auth)):
+async def train_progress(name: str, user: str = Depends(verify_api_key)):
     log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
     path = os.path.join(log_dir, name)
     if not os.path.exists(path):
@@ -386,7 +393,7 @@ async def train_progress(name: str, user: str = Depends(admin_auth)):
     return {"progress": entries}
 
 @app.get('/admin/stats')
-async def admin_stats(user: str = Depends(admin_auth)):
+async def admin_stats(user: str = Depends(verify_api_key)):
     return {"cpu": psutil.cpu_percent(interval=0.5), "mem": psutil.virtual_memory()._asdict(), "gpu": {'available': torch.cuda.is_available()}}
 
 if __name__ == '__main__':

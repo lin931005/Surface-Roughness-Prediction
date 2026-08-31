@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 import time
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import io
 import os
 import random
@@ -20,15 +20,72 @@ API_URL = "http://127.0.0.1:2578"
 # ==========================================
 st.set_page_config(page_title='CNC 表面粗糙度自動化檢測系統', page_icon="⚙️", layout='wide')
 
-st.title('🚀 CNC 加工表面粗糙度自動化檢測系統')
-st.markdown("本系統採用 **ResNet-50 雙通道深度學習架構**，提供高精準度 Ra 值自動估算與批量驗證分析。")
+# ==========================================
+# 🔒 系統安全登入驗證區塊 (純密碼分級制)
+# ==========================================
+# 💡 這裡設定你的兩組密碼 (你可以自行修改引號內的文字)
+ADMIN_PASSWORD = "lin10052578"
+USER_PASSWORD = "chen940422"
 
-# 💡 側邊欄切換操作模式
-tab = st.sidebar.radio('切換操作環境', [
-    '👨‍🔧 單筆影像檢測作業',
-    '🧪 批量驗證與精度分析 (Batch Evaluation)',
-    '👑 系統管理與模型控制台'
-])
+if 'role' not in st.session_state:
+    st.session_state['role'] = None
+
+# 如果尚未登入，顯示密碼輸入畫面
+if st.session_state['role'] is None:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.info("🔒 **安全防護鎖**：請輸入系統通行碼以解鎖功能。")
+
+        # 💡 使用 st.form 將輸入框與按鈕綁定，這樣按 Enter 就會等同於點擊送出
+        with st.form("login_form"):
+            pwd_input = st.text_input("系統通行密碼 (Password)", type="password", help="輸入不同密碼將解鎖不同權限")
+
+            # 💡 在表單內，必須把 st.button 換成 st.form_submit_button
+            submitted = st.form_submit_button("解鎖系統", use_container_width=True, type="primary")
+
+            if submitted:
+                if pwd_input == ADMIN_PASSWORD:
+                    st.session_state['role'] = 'admin'
+                    st.rerun()
+                elif pwd_input == USER_PASSWORD:
+                    st.session_state['role'] = 'user'
+                    st.rerun()
+                else:
+                    st.error("❌ 通行碼錯誤，請重新輸入。")
+    # 停止往下渲染主系統
+    st.stop()
+
+# ==========================================
+# 🔓 登入成功後的主程式區塊
+# ==========================================
+# 登出按鈕
+if st.sidebar.button("🚪 登出系統", use_container_width=True):
+    st.session_state['role'] = None
+    st.rerun()
+
+st.sidebar.markdown("---")
+
+# 💡 動態側邊欄：根據權限顯示不同稱呼與選單
+if st.session_state['role'] == 'admin':
+    st.sidebar.markdown("👤 歡迎登入, **👑 系統管理員**")
+    # 管理員可以看到所有分頁
+    available_tabs = [
+        '👨‍🔧 單筆影像檢測作業',
+        '🧪 批量驗證與精度分析 (Batch Evaluation)',
+        '👑 系統管理與模型控制台'
+    ]
+else:
+    st.sidebar.markdown("👤 歡迎登入, **👨‍🔧 現場作業員**")
+    # 一般使用者只能看到前兩個分頁 (管理員分頁被藏起來了！)
+    available_tabs = [
+        '👨‍🔧 單筆影像檢測作業',
+        '🧪 批量驗證與精度分析 (Batch Evaluation)'
+    ]
+
+# 渲染側邊欄選單
+tab = st.sidebar.radio('切換操作環境', available_tabs)
+
 
 # ==========================================
 # 🛠️ 工具函式：從檔名自動解析真實標籤 (Ground Truth)
@@ -352,143 +409,134 @@ else:
 
     st.subheader('👑 系統管理與模型控制台')
 
-    if 'token' not in st.session_state: st.session_state['token'] = ''
+    # 💡 定義與後端約定好的私密 API 金鑰 (請隨便想一串亂碼)
+    API_SECRET_KEY = "super_secret_cnc_key_2026"
 
-    with st.expander("🔑 系統管理員登入", expanded=not bool(st.session_state['token'])):
-        username = st.text_input('帳號 (Username)', value='admin')
-        password = st.text_input('密碼 (Password)', type='password')
-        if st.button('登入系統', use_container_width=True):
-            try:
-                r = requests.post(f'{API_URL}/login', params={'username': username, 'password': password})
-                if r.status_code == 200:
-                    st.session_state['token'] = r.json().get('access_token')
-                    st.success('登入成功！')
-                    st.rerun()
-                else: st.error('登入失敗，帳號或密碼錯誤。')
-            except Exception as e: st.error(f"連線錯誤：{str(e)}")
+    # 將金鑰封裝進 Header，之後所有的 requests 都會帶著這把鑰匙
+    headers = {'X-API-Key': API_SECRET_KEY}
 
-    token = st.session_state.get('token','')
+    tab_train, tab_model, tab_data, tab_history, tab_stats = st.tabs([
+        "🚀 訓練與終端機", "🤖 模型熱切換", "📊 資料集分析", "📜 預測紀錄與稽核", "🖥️ 硬體監控"
+    ])
 
-    if token:
-        headers = {'Authorization': f'Bearer {token}'}
-
-        tab_train, tab_model, tab_data, tab_history, tab_stats = st.tabs([
-            "🚀 訓練與終端機", "🤖 模型熱切換", "📊 資料集分析", "📜 預測紀錄與稽核", "🖥️ 硬體監控"
-        ])
-
-        with tab_train:
-            st.markdown("#### 🚀 啟動模型訓練管線 (Training Pipeline)")
-            col_btn1, col_btn2, col_btn3 = st.columns(3)
-            with col_btn1:
-                if st.button("⚙️ 啟動【立銑】回歸模型訓練", use_container_width=True, type="primary"):
-                    try:
-                        res = requests.post(f"{API_URL}/train?milling_type=End_Milling&token=admin-token", headers=headers)
-                        st.success(res.json().get("message", "指令發送成功"))
-                    except Exception as e: st.error(str(e))
-            with col_btn2:
-                if st.button("⚙️ 啟動【直銑】回歸模型訓練", use_container_width=True, type="primary"):
-                    try:
-                        res = requests.post(f"{API_URL}/train?milling_type=Peripheral_Milling&token=admin-token", headers=headers)
-                        st.success(res.json().get("message", "指令發送成功"))
-                    except Exception as e: st.error(str(e))
-            with col_btn3:
-                if st.button("📊 啟動【銑法分類器】模型訓練", use_container_width=True):
-                    try:
-                        res = requests.post(f"{API_URL}/train?milling_type=Classifier&token=admin-token", headers=headers)
-                        st.success(res.json().get("message", "指令發送成功"))
-                    except Exception as e: st.error(str(e))
-
-            st.markdown("---")
-            try:
-                r = requests.get(f'{API_URL}/train_logs', headers=headers)
-                logs = r.json().get('logs', [])
-            except Exception: logs = []
-
-            sel = st.selectbox('📡 選擇要監控的訓練日誌 (Log)', [''] + logs)
-
-            if sel:
-                col_ctrl1, col_ctrl2 = st.columns(2)
-                with col_ctrl1:
-                    if st.session_state.get('monitor') != sel:
-                        if st.button('▶️ 啟動即時監聽', use_container_width=True):
-                            st.session_state['monitor'] = sel
-                            st.rerun()
-                with col_ctrl2:
-                    if st.session_state.get('monitor') == sel:
-                        if st.button('🛑 停止監聽', use_container_width=True):
-                            st.session_state['monitor'] = ''
-                            st.rerun()
-
-                if st.session_state.get('monitor') == sel:
-                    col_chart, col_term = st.columns([1, 1])
-                    chart_placeholder = col_chart.empty()
-                    term_placeholder = col_term.empty()
-
-                    while st.session_state.get('monitor') == sel:
-                        try:
-                            r_prog = requests.get(f'{API_URL}/train_progress/{sel}', headers=headers, timeout=3)
-                            progress = r_prog.json().get('progress', []) if r_prog.status_code == 200 else []
-                            if progress:
-                                df = pd.DataFrame(progress).set_index('epoch')
-                                chart_placeholder.line_chart(df[['train_loss','val_loss']])
-                        except: pass
-
-                        try:
-                            r_text = requests.get(f'{API_URL}/train_logs/{sel}', headers=headers, timeout=3)
-                            if r_text.status_code == 200:
-                                log_text = r_text.json().get('log', '')
-                                lines = log_text.split('\n')
-                                tail_text = '\n'.join(lines[-25:])
-                                term_placeholder.code(tail_text, language='bash')
-                        except: pass
-                        time.sleep(2)
-
-        with tab_model:
-            st.markdown("#### 🔄 模型版本控制 (Rollback)")
-            try:
-                r_models = requests.get(f'{API_URL}/models')
-                if r_models.status_code == 200:
-                    model_list = [m['file'] for m in r_models.json().get('models', [])]
-                    if model_list:
-                        selected_model = st.selectbox("選擇要載入的歷史模型檔案", model_list)
-                        if st.button("🌟 設為上線模型 (Deploy)", type="primary"):
-                            res = requests.post(f'{API_URL}/admin/set_active_model', params={'model_file': selected_model}, headers=headers)
-                            if res.status_code == 200: st.success(res.json().get('msg'))
-                            else: st.error(res.json().get('error'))
-            except Exception as e: st.error(f"獲取模型清單失敗: {e}")
-
-        with tab_data:
-            st.markdown("#### 📊 當前訓練資料集分佈")
-            csv_path = os.path.join(BASE_DIR, 'data', 'final_training_manifest.csv')
-            if os.path.exists(csv_path):
-                df_data = pd.read_csv(csv_path)
-                st.success(f"目前資料庫中共有 **{len(df_data)}** 張有效訓練影像。")
-                col1, col2 = st.columns(2)
-                with col1: st.bar_chart(df_data['speed'].value_counts())
-                with col2: st.dataframe(df_data.head())
-
-        with tab_history:
-            st.markdown("#### 📜 歷史預測稽核日誌")
-            pred_path = os.path.join(BASE_DIR, 'results', 'predictions.csv')
-            if os.path.exists(pred_path):
-                df_pred = pd.read_csv(pred_path)
-                df_pred['timestamp'] = pd.to_datetime(df_pred['timestamp'], unit='s')
-                df_pred = df_pred.sort_values('timestamp', ascending=False).reset_index(drop=True)
-                st.dataframe(df_pred, use_container_width=True)
-                csv = df_pred.to_csv(index=False).encode('utf-8-sig')
-                st.download_button(label="📥 匯出預測紀錄 (CSV)", data=csv, file_name='system_predictions_log.csv', mime='text/csv')
-
-        with tab_stats:
-            st.markdown("#### 🖥️ 伺服器即時狀態")
-            if st.button('🔄 重新整理狀態', type="primary"):
+    with tab_train:
+        st.markdown("#### 🚀 啟動模型訓練管線 (Training Pipeline)")
+        col_btn1, col_btn2, col_btn3 = st.columns(3)
+        with col_btn1:
+            if st.button("⚙️ 啟動【立銑】回歸模型訓練", use_container_width=True, type="primary"):
                 try:
-                    s = requests.get(f'{API_URL}/admin/stats', headers=headers)
-                    if s.status_code == 200:
-                        stats = s.json()
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("CPU 使用率", f"{stats['cpu']} %")
-                        col2.metric("記憶體使用率", f"{stats['mem']['percent']} %")
-                        col3.metric("GPU 狀態", "✅ 啟動" if stats['gpu']['available'] else "❌ 未偵測到")
+                    # ✅ 拔掉 token，保留 headers 即可
+                    res = requests.post(f"{API_URL}/train?milling_type=End_Milling", headers=headers)
+                    st.success(res.json().get("message", "指令發送成功"))
                 except Exception as e: st.error(str(e))
-    else:
-        st.warning("⚠️ 請先於上方登入系統，以解鎖完整 MLOps 功能。")
+
+        # 修正 2：直銑訓練
+        with col_btn2:
+            if st.button("⚙️ 啟動【直銑】回歸模型訓練", use_container_width=True, type="primary"):
+                try:
+                    # ✅ 拔掉 token
+                    res = requests.post(f"{API_URL}/train?milling_type=Peripheral_Milling", headers=headers)
+                    st.success(res.json().get("message", "指令發送成功"))
+                except Exception as e: st.error(str(e))
+
+        # 修正 3：分類器訓練
+        with col_btn3:
+            if st.button("📊 啟動【銑法分類器】模型訓練", use_container_width=True):
+                try:
+                    # ✅ 拔掉 token
+                    res = requests.post(f"{API_URL}/train?milling_type=Classifier", headers=headers)
+                    st.success(res.json().get("message", "指令發送成功"))
+                except Exception as e: st.error(str(e))
+
+        st.markdown("---")
+        try:
+            r = requests.get(f'{API_URL}/train_logs', headers=headers)
+            logs = r.json().get('logs', [])
+        except Exception: logs = []
+
+        sel = st.selectbox('📡 選擇要監控的訓練日誌 (Log)', [''] + logs)
+
+        if sel:
+            col_ctrl1, col_ctrl2 = st.columns(2)
+            with col_ctrl1:
+                if st.session_state.get('monitor') != sel:
+                    if st.button('▶️ 啟動即時監聽', use_container_width=True):
+                        st.session_state['monitor'] = sel
+                        st.rerun()
+            with col_ctrl2:
+                if st.session_state.get('monitor') == sel:
+                    if st.button('🛑 停止監聽', use_container_width=True):
+                        st.session_state['monitor'] = ''
+                        st.rerun()
+
+            if st.session_state.get('monitor') == sel:
+                col_chart, col_term = st.columns([1, 1])
+                chart_placeholder = col_chart.empty()
+                term_placeholder = col_term.empty()
+
+                while st.session_state.get('monitor') == sel:
+                    try:
+                        r_prog = requests.get(f'{API_URL}/train_progress/{sel}', headers=headers, timeout=3)
+                        progress = r_prog.json().get('progress', []) if r_prog.status_code == 200 else []
+                        if progress:
+                            df = pd.DataFrame(progress).set_index('epoch')
+                            chart_placeholder.line_chart(df[['train_loss','val_loss']])
+                    except: pass
+
+                    try:
+                        r_text = requests.get(f'{API_URL}/train_logs/{sel}', headers=headers, timeout=3)
+                        if r_text.status_code == 200:
+                            log_text = r_text.json().get('log', '')
+                            lines = log_text.split('\n')
+                            tail_text = '\n'.join(lines[-25:])
+                            term_placeholder.code(tail_text, language='bash')
+                    except: pass
+                    time.sleep(2)
+
+    with tab_model:
+        st.markdown("#### 🔄 模型版本控制 (Rollback)")
+        try:
+            r_models = requests.get(f'{API_URL}/models')
+            if r_models.status_code == 200:
+                model_list = [m['file'] for m in r_models.json().get('models', [])]
+                if model_list:
+                    selected_model = st.selectbox("選擇要載入的歷史模型檔案", model_list)
+                    if st.button("🌟 設為上線模型 (Deploy)", type="primary"):
+                        res = requests.post(f'{API_URL}/admin/set_active_model', params={'model_file': selected_model}, headers=headers)
+                        if res.status_code == 200: st.success(res.json().get('msg'))
+                        else: st.error(res.json().get('error'))
+        except Exception as e: st.error(f"獲取模型清單失敗: {e}")
+
+    with tab_data:
+        st.markdown("#### 📊 當前訓練資料集分佈")
+        csv_path = os.path.join(BASE_DIR, 'data', 'final_training_manifest.csv')
+        if os.path.exists(csv_path):
+            df_data = pd.read_csv(csv_path)
+            st.success(f"目前資料庫中共有 **{len(df_data)}** 張有效訓練影像。")
+            col1, col2 = st.columns(2)
+            with col1: st.bar_chart(df_data['speed'].value_counts())
+            with col2: st.dataframe(df_data.head())
+
+    with tab_history:
+        st.markdown("#### 📜 歷史預測稽核日誌")
+        pred_path = os.path.join(BASE_DIR, 'results', 'predictions.csv')
+        if os.path.exists(pred_path):
+            df_pred = pd.read_csv(pred_path)
+            df_pred['timestamp'] = pd.to_datetime(df_pred['timestamp'], unit='s')
+            df_pred = df_pred.sort_values('timestamp', ascending=False).reset_index(drop=True)
+            st.dataframe(df_pred, use_container_width=True)
+            csv = df_pred.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(label="📥 匯出預測紀錄 (CSV)", data=csv, file_name='system_predictions_log.csv', mime='text/csv')
+
+    with tab_stats:
+        st.markdown("#### 🖥️ 伺服器即時狀態")
+        if st.button('🔄 重新整理狀態', type="primary"):
+            try:
+                s = requests.get(f'{API_URL}/admin/stats', headers=headers)
+                if s.status_code == 200:
+                    stats = s.json()
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("CPU 使用率", f"{stats['cpu']} %")
+                    col2.metric("記憶體使用率", f"{stats['mem']['percent']} %")
+                    col3.metric("GPU 狀態", "✅ 啟動" if stats['gpu']['available'] else "❌ 未偵測到")
+            except Exception as e: st.error(str(e))

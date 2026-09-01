@@ -4,26 +4,13 @@ Run FastAPI server:
 
 ```bash
 pip install -r webapp/requirements.txt
-uvicorn webapp.app.main:app --host 0.0.0.0 --port 8000
+uvicorn webapp.app.main:app --host 0.0.0.0 --port 2578
 ```
 
 Run Streamlit UI (optional):
 
 ```bash
-streamlit run webapp/streamlit_app.py
-```
-
-Docker build:
-
-```bash
-docker build -t surface-roughness .
-docker run -p 8000:8000 surface-roughness
-```
-
-Docker Compose (一鍵啟動 API + Streamlit UI):
-
-```bash
-docker-compose up -d --build
+streamlit run webapp/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
 ```
 
 執行測試：

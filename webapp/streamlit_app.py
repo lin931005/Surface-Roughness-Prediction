@@ -195,7 +195,7 @@ if tab == '👨‍🔧 單筆影像檢測作業':
                                         st.warning(f"🚨 **影像品質警告：** 系統對此影像之特徵辨識度偏低 (置信度 {ai_conf:.1f}%)。可能原因為對焦模糊或非標準切削表面，分析已中斷。")
 
                                     # 迷因圖防呆
-                                    meme_folder = os.path.join("data", "Utfg2026")
+                                    meme_folder = os.path.join("data", "example")
                                     if os.path.exists(meme_folder):
                                         valid_exts = ('.png', '.jpg', '.jpeg')
                                         all_images = [f for f in os.listdir(meme_folder) if f.lower().endswith(valid_exts)]

@@ -31,21 +31,34 @@
 
 ## 執行方式
 
-請先安裝 Python 3.10 以上版本，並在專案根目錄建立虛擬環境：
+以下步驟適用於已將專案複製到新電腦的 Windows 環境。重點是不要寫死本機路徑，請在專案根目錄中執行。
+
+### 1. 安裝 Python
+
+請先安裝 Python 3.10 以上版本，並確認已加入 PATH。
+
+### 2. 建立虛擬環境並安裝套件
+
+在專案根目錄開啟 PowerShell 後執行：
 
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-若已完成環境設定，在 Windows 上可直接執行：
+### 3. 啟動系統
+
+若已完成環境設定，可直接在專案根目錄執行：
 
 ```text
 start_app.cmd
 ```
 
-也可以分別啟動後端與前端：
+這個腳本會自動以目前專案資料夾為根目錄啟動後端與前端，適合在不同電腦上重複使用。
+
+若要手動啟動，可使用：
 
 ```powershell
 python -m uvicorn webapp.app.main:app --host 0.0.0.0 --port 2578

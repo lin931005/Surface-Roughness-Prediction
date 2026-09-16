@@ -320,7 +320,7 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             df_res = pd.DataFrame(results)
 
             # ==========================================
-            # 📊 第一區塊：核心 KPI 指標統計儀表板
+            # 📊 第一區塊：核心 KPI 指標統計儀表板 (新增細分準確度)
             # ==========================================
             st.markdown("---")
             st.markdown("### 🎯 系統綜合效能 KPI 統計")
@@ -330,22 +330,34 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             else:
                 valid_df = pd.DataFrame()
 
-            c1, c2, c3, c4 = st.columns(4)
+            # 將佈局從 4 欄改為 6 欄，以容納細分的指標
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
 
             if '銑法辨識' in df_res.columns:
                 type_checked = df_res[df_res['銑法辨識'] != "❓ 未知"]
                 acc = (type_checked['銑法辨識'] == "✅ 正確").mean() * 100 if not type_checked.empty else 0.0
-                c1.metric("👁️ 銑法辨識正確率", f"{acc:.1f} %")
+                c1.metric("👁️ 綜合辨識率", f"{acc:.1f} %")
             else:
-                c1.metric("👁️ 銑法辨識正確率", "N/A")
+                c1.metric("👁️ 綜合辨識率", "N/A")
 
+            # 綜合誤差
             mae = valid_df['絕對誤差 (μm)'].mean() if not valid_df.empty else 0.0
-            c2.metric("📏 平均絕對誤差 (MAE)", f"{mae:.4f} μm")
+            c2.metric("📏 綜合 MAE", f"{mae:.4f} μm")
 
             mape = valid_df['偏差率 (%)'].mean() if not valid_df.empty else 0.0
-            c3.metric("📉 平均相對偏差率 (MAPE)", f"{mape:.2f} %")
+            c3.metric("📉 綜合 MAPE", f"{mape:.2f} %")
 
-            c4.metric("📸 測試影像總數", f"{len(df_res)} 張")
+            # 立銑 (End Milling) 專屬誤差
+            end_milling_df = valid_df[valid_df['真實銑法'] == '立銑']
+            end_mape = end_milling_df['偏差率 (%)'].mean() if not end_milling_df.empty else 0.0
+            c4.metric("⚙️ 立銑 MAPE", f"{end_mape:.2f} %")
+
+            # 直銑 (Peripheral Milling) 專屬誤差
+            peri_milling_df = valid_df[valid_df['真實銑法'] == '直銑 (躺銑)']
+            peri_mape = peri_milling_df['偏差率 (%)'].mean() if not peri_milling_df.empty else 0.0
+            c5.metric("⚙️ 直銑 MAPE", f"{peri_mape:.2f} %")
+
+            c6.metric("📸 測試總數", f"{len(df_res)} 張")
 
             # ==========================================
             # 📈 第二區塊：視覺化圖表分析
@@ -513,9 +525,28 @@ else:
         if os.path.exists(csv_path):
             df_data = pd.read_csv(csv_path)
             st.success(f"目前資料庫中共有 **{len(df_data)}** 張有效訓練影像。")
+
             col1, col2 = st.columns(2)
-            with col1: st.bar_chart(df_data['speed'].value_counts())
-            with col2: st.dataframe(df_data.head())
+            with col1:
+                st.markdown("**主軸轉速 (RPM) 數據分佈**")
+                st.bar_chart(df_data['speed'].value_counts())
+
+            with col2:
+                st.markdown("**銑削加工法 (特徵類別) 比例**")
+                # 將原本的表格轉換為 Altair 甜甜圈圖
+                summary_df = df_data['machining_type'].value_counts().reset_index()
+                summary_df.columns = ['加工類型', '影像總數']
+
+                # 建立精美的甜甜圈圖
+                pie_chart = alt.Chart(summary_df).mark_arc(innerRadius=60).encode(
+                    theta=alt.Theta(field="影像總數", type="quantitative"),
+                    color=alt.Color(field="加工類型", type="nominal",
+                                    scale=alt.Scale(domain=['End_Milling', 'Peripheral_Milling', 'Other'],
+                                                    range=['#3b82f6', '#10b981', '#ef4444'])),
+                    tooltip=['加工類型', '影像總數']
+                ).properties(height=350)
+
+                st.altair_chart(pie_chart, use_container_width=True)
 
     with tab_history:
         st.markdown("#### 📜 歷史預測稽核日誌")

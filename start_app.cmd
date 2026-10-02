@@ -1,18 +1,11 @@
 @echo off
-setlocal
+chcp 65001 >nul
+echo 🚀 準備啟動 CNC MLOps 左右分割戰情室...
 
-:: 以腳本所在資料夾作為專案根目錄，避免寫死本機絕對路徑
+:: 1. 安全地切換到目前腳本所在的資料夾 (破解空格報錯的關鍵)
 cd /d "%~dp0"
 
-:: 若尚未建立 venv，先建立並安裝套件
-if not exist "venv\Scripts\python.exe" (
-    python -m venv venv
-    call venv\Scripts\activate.bat
-    python -m pip install --upgrade pip
-    python -m pip install -r requirements.txt
-) else (
-    call venv\Scripts\activate.bat
-)
-
-:: 使用 Windows Terminal 分割視窗，且左右兩側都啟動 venv
-wt -d "%~dp0" cmd /k "call venv\Scripts\activate.bat && python -m uvicorn webapp.app.main:app --host 0.0.0.0 --port 2578" ; split-pane -d "%~dp0" cmd /k "call venv\Scripts\activate.bat && python -m streamlit run webapp/streamlit_app.py"
+:: 2. 呼叫 Windows Terminal (wt)
+:: -d . 代表使用當前目錄
+:: -V 代表垂直切割 (Vertical)，也就是左半與右半
+wt -d . cmd /k "call venv\Scripts\activate.bat && uvicorn webapp.app.main:app --host 0.0.0.0 --port 2578" ; split-pane -V -d . cmd /k "call venv\Scripts\activate.bat && python -m streamlit run webapp/streamlit_app.py"

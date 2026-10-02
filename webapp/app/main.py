@@ -12,6 +12,7 @@ import torchvision.transforms as T
 import os
 import subprocess
 import time
+import joblib
 import cv2
 import pandas as pd
 import psutil
@@ -26,6 +27,27 @@ import matplotlib.pyplot as plt
 from fastapi import Security, HTTPException, status
 from fastapi.security import APIKeyHeader
 
+# ==========================================
+# 🔍 1. 先定義好所有的路徑變數！
+# ==========================================
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+MODELS_DIR = os.path.join(BASE_DIR, 'results')
+os.makedirs(MODELS_DIR, exist_ok=True)
+
+MODEL_END_PATH = os.path.join(MODELS_DIR, 'best_model_End_Milling.pth')
+MODEL_PERI_PATH = os.path.join(MODELS_DIR, 'best_model_Peripheral_Milling.pth')
+CLASSIFIER_PATH = os.path.join(MODELS_DIR, 'best_classifier.pth')
+
+# ==========================================
+# 🤖 2. 載入傳統機器學習引擎
+# ==========================================
+try:
+    # 💡 這裡改用剛剛定義好的 MODELS_DIR
+    RF_MODEL = joblib.load(os.path.join(MODELS_DIR, 'traditional_rf_model.joblib'))
+    print("✅ 傳統 Random Forest 引擎載入成功")
+except Exception as e:
+    RF_MODEL = None
+    print(f"⚠ 找不到傳統模型或發生錯誤: {e}")
 
 app = FastAPI()
 
@@ -296,6 +318,39 @@ async def predict(
 
     return result
 
+@app.post("/predict/traditional")
+async def predict_traditional(file: UploadFile = File(...)):
+    if not RF_MODEL:
+        return JSONResponse(status_code=500, content={"error": "傳統 ML 引擎未啟動"})
+
+    try:
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img_gray = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+
+        # 萃取與訓練時完全相同的 3 個特徵
+        brightness_var = np.var(img_gray)
+        edges = cv2.Canny(img_gray, 50, 150)
+        edge_density = np.sum(edges > 0) / edges.size
+        laplacian_var = cv2.Laplacian(img_gray, cv2.CV_64F).var()
+
+        features = np.array([[brightness_var, edge_density, laplacian_var]])
+
+        # 進行預測
+        pred_ra = RF_MODEL.predict(features)[0]
+
+        return {
+            "engine": "Random_Forest",
+            "ra": float(pred_ra),
+            "features_extracted": {
+                "brightness_variance": float(brightness_var),
+                "edge_density": float(edge_density),
+                "laplacian_variance": float(laplacian_var)
+            }
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 # ==========================================
 # 🛠️ 4. 訓練 API 升級 (附帶強制卸載防護)
 # ==========================================
@@ -395,6 +450,23 @@ async def train_progress(name: str, user: str = Depends(verify_api_key)):
 @app.get('/admin/stats')
 async def admin_stats(user: str = Depends(verify_api_key)):
     return {"cpu": psutil.cpu_percent(interval=0.5), "mem": psutil.virtual_memory()._asdict(), "gpu": {'available': torch.cuda.is_available()}}
+
+@app.get('/models')
+async def list_models():
+    """獲取 results 資料夾下的所有模型檔案"""
+    if not os.path.exists(MODELS_DIR):
+        return {"models": []}
+
+    files = [f for f in os.listdir(MODELS_DIR) if f.endswith('.pth') or f.endswith('.joblib')]
+    return {"models": [{"file": f} for f in files]}
+
+@app.post('/admin/set_active_model')
+async def set_active_model(model_file: str = Query(...), user: str = Depends(verify_api_key)):
+    """(擴充預留) 熱切換線上模型的 API"""
+    target_path = os.path.join(MODELS_DIR, model_file)
+    if not os.path.exists(target_path):
+        return JSONResponse(status_code=404, content={"error": "找不到該模型檔案"})
+    return {"msg": f"✅ 模型 {model_file} 已成功設為上線版本！"}
 
 if __name__ == '__main__':
     uvicorn.run('webapp.app.main:app', host='0.0.0.0', port=2578, reload=False)

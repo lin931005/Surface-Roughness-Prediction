@@ -168,17 +168,45 @@ if tab == '👨‍🔧 單筆影像檢測作業':
                             st.error(f"分析失敗：{j['error']}")
                         else:
                             # ============== 傳統引擎解析邏輯 ==============
+                            # ============== 傳統引擎解析邏輯 ==============
                             if "深度學習" not in engine_selection:
                                 st.success(f"### ✨ 表面粗糙度估算值 (Ra): **{j.get('ra'):.4f} μm**")
-                                st.info("⚙️ 系統當前調用之特徵萃取模型：**傳統機器視覺 (OpenCV + Random Forest)**")
+                                st.info("⚙️ 系統當前調用之特徵萃取模型：**傳統機器視覺 (OpenCV) + 隨機森林 (Random Forest)**")
 
-                                # 顯示傳統特徵萃取結果
-                                st.markdown("#### 🔬 OpenCV 傳統特徵數值")
+                                # --- 新增：視覺化特徵萃取過程 (XAI) ---
+                                st.markdown("#### 👁️ 影像特徵物理轉換過程 (Feature Extraction Pipeline)")
+                                st.write("傳統演算法不依賴黑盒子神經網路，而是透過固定濾波器提取具有物理意義的表面紋理，再交由機器學習進行迴歸預測。")
+
+                                # 💡 為了在網頁展示，我們用 OpenCV 重現後端萃取特徵時的影像變化
+                                import cv2
+                                import numpy as np
+                                img_cv = np.array(img.convert('RGB'))
+                                img_gray = cv2.cvtColor(img_cv, cv2.COLOR_RGB2GRAY)
+
+                                # 產生特徵圖
+                                edges = cv2.Canny(img_gray, 50, 150)
+                                laplacian = cv2.Laplacian(img_gray, cv2.CV_64F)
+                                laplacian_disp = cv2.convertScaleAbs(laplacian) # 轉為可顯示的圖片格式
+
+                                col_v1, col_v2, col_v3 = st.columns(3)
+                                with col_v1:
+                                    st.image(img_gray, caption='1. 灰階轉換 (評估整體明暗對比)', width='stretch')
+                                with col_v2:
+                                    st.image(edges, caption='2. Canny 邊緣偵測 (擷取刀痕特徵)', width='stretch')
+                                with col_v3:
+                                    st.image(laplacian_disp, caption='3. Laplacian 濾波 (捕捉表面銳利度)', width='stretch')
+
+                                # --- 顯示最終萃取數值 ---
+                                st.markdown("#### 🔢 轉換為機器學習特徵向量 (Feature Vector)")
                                 feats = j.get('features_extracted', {})
                                 c1, c2, c3 = st.columns(3)
-                                c1.metric("亮度變異數 (Brightness Var)", f"{feats.get('brightness_variance', 0):.1f}")
-                                c2.metric("邊緣密度 (Edge Density)", f"{feats.get('edge_density', 0):.4f}")
-                                c3.metric("模糊變異數 (Laplacian Var)", f"{feats.get('laplacian_variance', 0):.1f}")
+                                c1.metric("💡 亮度變異數", f"{feats.get('brightness_variance', 0):.1f}", "對應圖 1")
+                                c2.metric("🔪 邊緣密度", f"{feats.get('edge_density', 0):.4f}", "對應圖 2")
+                                c3.metric("🌫️ 模糊變異數", f"{feats.get('laplacian_variance', 0):.1f}", "對應圖 3")
+
+                                st.markdown("---")
+                                st.markdown("👉 **運算邏輯總結**：系統將上述 3 個特徵值打包成一維數學向量 `[亮度, 邊緣, 模糊度]`，輸入至已訓練完畢的 **Random Forest 決策樹群集** 中，透過 100 棵決策樹的投票機制，得出最終的 Ra 預測數值。")
+
                                 st.stop()
 
                             # ============== 以下為深度學習解析邏輯 ==============

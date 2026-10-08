@@ -553,23 +553,44 @@ else:
         try:
             res = requests.post(f"{API_URL}/train", params={'milling_type': milling_type}, headers=HEADERS)
             if res.status_code == 200: st.success(res.json().get("message", "指令發送成功"))
-            else: st.error(f"啟動失敗 (狀態碼 {res.status_code})：{res.text}")
+            else:
+                try: detail = res.json().get('error') or res.text
+                except ValueError: detail = res.text
+                st.error(f"啟動失敗：{detail}")
         except Exception as e: st.error(str(e))
 
     with tab_train:
         st.markdown("#### 🚀 啟動模型訓練管線 (Training Pipeline)")
+
+        # 💡 同一時間只能跑一組訓練：進行中時顯示進度並停用按鈕
+        try:
+            status_res = requests.get(f"{API_URL}/train_status", headers=HEADERS, timeout=3)
+            train_status = status_res.json() if status_res.status_code == 200 else {}
+        except Exception:
+            train_status = {}
+        training_busy = bool(train_status.get('running'))
+        if training_busy:
+            jobs, current = train_status.get('jobs', []), train_status.get('current')
+            step = jobs.index(current) + 1 if current in jobs else len(jobs)
+            st.info(f"🔄 訓練進行中：**{ROLE_LABELS.get(current, current)}**（第 {step}/{len(jobs)} 個）。同一時間只能跑一組訓練，結束後才能再啟動。")
+        elif train_status.get('failed'):
+            st.warning("⚠️ 上一次訓練有失敗的模型：" + "、".join(ROLE_LABELS.get(m, m) for m in train_status['failed']) + "，請查看下方的訓練日誌。")
+
+        if st.button("🚀 依序訓練全部模型（立銑 → 直銑 → 銑法分類器 → 傳統視覺 RF）", use_container_width=True,
+                     type="primary", disabled=training_busy):
+            start_training("All")
         col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
         with col_btn1:
-            if st.button("⚙️ 啟動【立銑】回歸模型訓練", use_container_width=True, type="primary"):
+            if st.button("⚙️ 啟動【立銑】回歸模型訓練", use_container_width=True, disabled=training_busy):
                 start_training("End_Milling")
         with col_btn2:
-            if st.button("⚙️ 啟動【直銑】回歸模型訓練", use_container_width=True, type="primary"):
+            if st.button("⚙️ 啟動【直銑】回歸模型訓練", use_container_width=True, disabled=training_busy):
                 start_training("Peripheral_Milling")
         with col_btn3:
-            if st.button("📊 啟動【銑法分類器】模型訓練", use_container_width=True):
+            if st.button("📊 啟動【銑法分類器】模型訓練", use_container_width=True, disabled=training_busy):
                 start_training("Classifier")
         with col_btn4:
-            if st.button("🌲 啟動【傳統視覺 RF】模型訓練", use_container_width=True):
+            if st.button("🌲 啟動【傳統視覺 RF】模型訓練", use_container_width=True, disabled=training_busy):
                 start_training("Traditional")
 
         st.markdown("---")

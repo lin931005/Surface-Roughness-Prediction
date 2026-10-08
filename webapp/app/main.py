@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, BackgroundTasks, Query, Depends
+from fastapi import FastAPI, File, UploadFile, Query, Depends
 from fastapi.responses import JSONResponse
 import uvicorn
 from PIL import Image
@@ -21,7 +21,9 @@ import random
 import asyncio
 import gc
 import secrets
+import threading
 import zlib
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import Security, HTTPException, status
 from fastapi.security import APIKeyHeader
@@ -413,54 +415,66 @@ async def predict_traditional(file: UploadFile = File(...)):
 # ==========================================
 # 🛠️ 4. 訓練 API 升級 (附帶強制卸載防護)
 # ==========================================
-def run_training_script(milling_type: str):
-    """這支函式會在背景獨立執行"""
-    unload_models_to_free_vram()
+TRAINING_ORDER = ["End_Milling", "Peripheral_Milling", "Classifier", "Traditional"]
+# 💡 同一時間只跑一組訓練：訓練時 CPU 已經滿載，同時跑多個不會比較快，還會互搶資源
+training_lock = threading.Lock()
+training_status = {"running": False, "jobs": [], "current": None, "finished": [], "failed": []}
 
+def training_command(milling_type: str):
+    """💡 核心修改：分類器與傳統模型不需要後面的參數，專家大腦才需要"""
+    python_exe = sys.executable
+    if milling_type == "Classifier":
+        return [python_exe, os.path.join(BASE_DIR, "scripts", "train_classifier.py")]
+    if milling_type == "Traditional":
+        return [python_exe, os.path.join(BASE_DIR, "scripts", "train_traditional_ml.py")]
+    return [python_exe, os.path.join(BASE_DIR, "scripts", "train_model.py"), "--milling_type", milling_type]
+
+def run_training_jobs(milling_types):
+    """在背景執行緒中依序訓練，每個模型各自一個日誌檔；全部結束後釋放訓練鎖"""
     try:
-        from datetime import datetime
-        python_exe = sys.executable
-
-        script_dataset = os.path.join(BASE_DIR, "scripts", "dataset_prepare.py")
-
-        # 💡 核心修改：判斷要呼叫哪一支訓練腳本
-        if milling_type == "Classifier":
-            script_train = os.path.join(BASE_DIR, "scripts", "train_classifier.py")
-        elif milling_type == "Traditional":
-            script_train = os.path.join(BASE_DIR, "scripts", "train_traditional_ml.py")
-        else:
-            script_train = os.path.join(BASE_DIR, "scripts", "train_model.py")
-
+        unload_models_to_free_vram()
         log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
         os.makedirs(log_dir, exist_ok=True)
-        time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        logfile = os.path.join(log_dir, f'train_{milling_type}_{time_str}.log')
-
         custom_env = os.environ.copy()
         custom_env["PYTHONIOENCODING"] = "utf-8"
 
-        with open(logfile, 'wb') as f:
-            f.write(f"🚀 開始為【{milling_type}】準備資料庫...\n".encode('utf-8'))
-            subprocess.run([python_exe, script_dataset], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
-
-            f.write(f"\n🚀 啟動【{milling_type}】神經網路訓練...\n".encode('utf-8'))
-
-            # 💡 核心修改：分類器與傳統模型不需要後面的參數，專家大腦才需要
-            if milling_type in ("Classifier", "Traditional"):
-                subprocess.Popen([python_exe, script_train], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
-            else:
-                subprocess.Popen([python_exe, script_train, "--milling_type", milling_type], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
-
+        for i, milling_type in enumerate(milling_types, start=1):
+            training_status["current"] = milling_type
+            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            logfile = os.path.join(log_dir, f'train_{milling_type}_{time_str}.log')
+            with open(logfile, 'wb') as f:
+                if i == 1:
+                    # 資料清單只要在開始前產生一次
+                    f.write("🚀 開始準備資料庫...\n".encode('utf-8'))
+                    f.flush()
+                    subprocess.run([sys.executable, os.path.join(BASE_DIR, "scripts", "dataset_prepare.py")],
+                                   cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
+                f.write(f"\n🚀 啟動【{milling_type}】訓練（第 {i}/{len(milling_types)} 個）...\n".encode('utf-8'))
+                f.flush()
+                result = subprocess.run(training_command(milling_type), cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
+            training_status["finished" if result.returncode == 0 else "failed"].append(milling_type)
     except Exception as e:
         print(f"❌ [背景任務] 訓練發生錯誤: {str(e)}")
+    finally:
+        training_status.update(running=False, current=None)
+        training_lock.release()
 
 @app.post("/train")
-async def start_training(milling_type: str = Query(...), background_tasks: BackgroundTasks = BackgroundTasks()):
-    if milling_type not in ["End_Milling", "Peripheral_Milling", "Classifier", "Traditional"]:
+async def start_training(milling_type: str = Query(...)):
+    if milling_type not in TRAINING_ORDER + ["All"]:
         return JSONResponse({"error": "未知的訓練類型"}, status_code=400)
+    if not training_lock.acquire(blocking=False):
+        return JSONResponse({"error": "已有訓練正在進行，請等目前的訓練結束後再試。"}, status_code=409)
 
-    background_tasks.add_task(run_training_script, milling_type)
-    return {"message": f"✅ 【{milling_type}】訓練排程已在背景啟動！已自動釋放記憶體，請至 Train Logs 查看進度。"}
+    jobs = list(TRAINING_ORDER) if milling_type == "All" else [milling_type]
+    training_status.update(running=True, jobs=jobs, current=jobs[0], finished=[], failed=[])
+    threading.Thread(target=run_training_jobs, args=(jobs,), daemon=True).start()
+    return {"message": f"✅ 已在背景依序訓練【{'、'.join(jobs)}】！已自動釋放記憶體，請至 Train Logs 查看進度。"}
+
+@app.get("/train_status")
+async def get_training_status():
+    """目前的訓練進度：是否進行中、正在訓練哪一個、已完成與失敗的模型"""
+    return training_status
 
 def log_prediction(filename: str, ra: float):
     try:

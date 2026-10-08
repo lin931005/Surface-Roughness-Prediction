@@ -6,11 +6,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import cv2
 import numpy as np
 import torchvision.models as models
 import torchvision.transforms as transforms
-from PIL import Image
 import functools
 from datetime import datetime
 
@@ -29,14 +27,13 @@ EPOCHS = 100
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from project_root import str_path
 from model_versions import archive_current, current_path, write_meta
+from preprocessing import (PATCH_SIZE, EVAL_GRID, PREPROCESS_VERSION, to_input, load_gray, grid_boxes,
+                           random_train_patch)
 
 CSV_PATH = str_path('data', 'final_training_manifest.csv')
 RESULTS_DIR = str_path('results')
 BEST_MODEL_PATH = str(current_path('Classifier'))
 LOSS_CSV_PATH = os.path.join(RESULTS_DIR, 'loss_record_Classifier.csv')
-
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
 
 # ==========================================
 # 1. 視覺分類專屬資料讀取器 (0: 立銑, 1: 直銑)
@@ -45,18 +42,11 @@ class ClassifierDataset(Dataset):
     def __init__(self, df, is_train=True):
         self.df = df.reset_index(drop=True)
         self.is_train = is_train
-        self.train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.5, 1.0)),
+        # 位置、大小與旋轉的隨機變化在 random_train_patch 裡處理，這裡只做翻轉與亮度對比
+        self.augment = transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(),
             transforms.ColorJitter(brightness=0.3, contrast=0.3),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
-        self.eval_transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ])
         # 將字串轉換為數字標籤
         self.label_map = {"End_Milling": 0, "Peripheral_Milling": 1, "Other": 2}
@@ -71,15 +61,16 @@ class ClassifierDataset(Dataset):
         label = self.label_map[row['machining_type']]
 
         try:
-            img_array = np.fromfile(img_path, dtype=np.uint8)
-            img_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-            img_pil = Image.fromarray(img_rgb).convert('L').convert('RGB')
+            img_pil = load_gray(img_path)
         except Exception as e:
             raise IOError(f"讀取圖片發生錯誤 {img_path}: {str(e)}")
 
-        transform = self.train_transform if self.is_train else self.eval_transform
-        return transform(img_pil), torch.tensor(label, dtype=torch.long)
+        # 從原始解析度切固定大小的方塊；驗證時均勻取 3x3 個方塊，評估時取平均
+        if self.is_train:
+            img_tensor = to_input(self.augment(random_train_patch(img_pil)))
+        else:
+            img_tensor = torch.stack([to_input(img_pil.crop(box)) for box in grid_boxes(img_pil)])
+        return img_tensor, torch.tensor(label, dtype=torch.long)
 
 # ==========================================
 # 2. 輕量級視覺大腦 (ResNet-18)
@@ -111,8 +102,10 @@ def evaluate(model, dataloader, criterion, device):
     with torch.no_grad():
         for imgs, labels in dataloader:
             imgs, labels = imgs.to(device), labels.to(device)
+            n_imgs, n_patches = imgs.shape[:2]
             with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
-                preds = model(imgs)
+                # 和線上推論相同：同一張照片各方塊的輸出取平均後再判斷類別
+                preds = model(imgs.flatten(0, 1)).view(n_imgs, n_patches, -1).mean(dim=1)
                 loss = criterion(preds, labels)
 
             total_loss += loss.item()
@@ -138,21 +131,23 @@ def main():
     if 'split' not in df.columns:
         raise ValueError("❌ CSV 缺少 split 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
 
-    # 依工件切分 (由 dataset_prepare.py 決定)：驗證集的工件訓練時完全看不到
+    # 依刀切分 (由 dataset_prepare.py 決定)：驗證集的刀訓練時完全看不到
     train_df = df[df['split'] == 'train'].reset_index(drop=True)
     val_df = df[df['split'] == 'val'].reset_index(drop=True)
     val_milling = val_df[val_df['machining_type'] != 'Other']
     val_conditions = sorted({f"{t}/{c}" for t, c in zip(val_milling['machining_type'], val_milling['condition_id'])})
 
     print(f"📂 成功載入 {len(df)} 筆影像資料！(包含立銑、直銑與 Other 負面教材)")
-    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張（驗證集的工件訓練時不會看到）")
+    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張（驗證集的刀訓練時不會看到）")
 
     archived = archive_current('Classifier')
     if archived:
         print(f"🗄️ 舊版模型已備份為 results/archive/{archived}")
 
     train_loader = DataLoader(ClassifierDataset(train_df, True), batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
-    val_loader = DataLoader(ClassifierDataset(val_df, False), batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
+    # 驗證時每張照片有 EVAL_GRID² 個方塊，批次張數相應縮小
+    val_loader = DataLoader(ClassifierDataset(val_df, False), batch_size=max(1, BATCH_SIZE // EVAL_GRID ** 2), shuffle=False, num_workers=NUM_WORKERS)
+    print(f"🔍 前處理：從原始照片切 {PATCH_SIZE}x{PATCH_SIZE} 方塊後縮成 224x224，驗證時每張照片取 {EVAL_GRID}x{EVAL_GRID} 個方塊平均")
 
     model = ClassifierModel().to(device)
     criterion = nn.CrossEntropyLoss()
@@ -202,6 +197,7 @@ def main():
                 'train_images': len(train_df),
                 'val_images': len(val_df),
                 'val_conditions': val_conditions,
+                'preprocess': PREPROCESS_VERSION,
             })
             print("  👉 已儲存最佳分類器模型！")
         else:

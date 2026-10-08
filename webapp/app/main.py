@@ -8,7 +8,6 @@ import shutil
 import torch
 import torch.nn as nn
 import torchvision.models as models
-import torchvision.transforms as T
 import os
 import subprocess
 import time
@@ -22,6 +21,7 @@ import random
 import asyncio
 import gc
 import secrets
+import zlib
 from dotenv import load_dotenv
 from fastapi import Security, HTTPException, status
 from fastapi.security import APIKeyHeader
@@ -38,6 +38,8 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from model_versions import (MODEL_FILES, ARCHIVE_DIR, current_path, read_meta, version_of,
                             archived_name, list_archived, deploy_archived)
+from preprocessing import (PREPROCESS_VERSION, to_input, load_gray, patch_side, grid_boxes, tile_boxes,
+                           random_box)
 
 # ==========================================
 # 🔒 API 金鑰：從專案根目錄的 .env 讀取，不寫死在程式碼裡
@@ -91,6 +93,7 @@ except Exception as e:
 # ==========================================
 expert_models = {"End_Milling": None, "Peripheral_Milling": None}
 classifier_model = None
+model_preprocess = {}  # 各模型訓練時使用的前處理版本（來自 meta.json），用來提醒舊模型需要重新訓練
 
 # 全域狀態與計時器
 models_are_loaded = False
@@ -144,6 +147,9 @@ def load_models_on_demand():
     if current_path("Classifier").exists():
         classifier_model = load_torch_model("Classifier", current_path("Classifier"))
 
+    for role in ("End_Milling", "Peripheral_Milling", "Classifier"):
+        model_preprocess[role] = (read_meta(current_path(role)) or {}).get("preprocess")
+
     models_are_loaded = True
     print("✅ 模型掛載完成，系統已進入戰鬥狀態！")
 
@@ -179,38 +185,42 @@ async def startup_event():
     asyncio.create_task(idle_timeout_checker())
     print("🚀 API 伺服器已啟動，閒置卸載監控已開啟 (10分鐘超時)。")
 
-transform = T.Compose([
-    T.Resize((224, 224)),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
-])
-
 # ==========================================
 # 🎨 Grad-CAM 熱力圖
 # ==========================================
-def compute_gradcam(model, img_tensor, params_tensor, base_img):
-    """回歸模型的 Grad-CAM：以預測的 Ra 對 ResNet 最後一層特徵圖取梯度，標出影響預測最大的區域"""
+def compute_gradcam(model, img_bw, params_row):
+    """回歸模型的 Grad-CAM：把影像切成蓋滿整張的方塊（與預測相同的放大倍率），
+    各方塊以預測的 Ra 對 ResNet 最後一層特徵圖取梯度，再拼回整張圖，標出影響預測最大的區域"""
+    device = next(model.parameters()).device
+    boxes = tile_boxes(img_bw)
+    batch = torch.stack([to_input(img_bw.crop(box)) for box in boxes]).to(device)
     feature_maps = {}
     handle = model.resnet.layer4.register_forward_hook(lambda module, inp, out: feature_maps.update(value=out))
     try:
         with torch.enable_grad():
-            output = model(img_tensor, params_tensor)
+            output = model(batch, params_row.expand(len(boxes), -1))
             grads = torch.autograd.grad(output.sum(), feature_maps['value'])[0]
     finally:
         handle.remove()
 
     weights = grads.mean(dim=(2, 3), keepdim=True)
-    cam = torch.relu((weights * feature_maps['value']).sum(dim=1)).squeeze(0).detach().cpu().numpy()
-    cam = cam - cam.min()
+    cams = torch.relu((weights * feature_maps['value']).sum(dim=1)).detach().cpu().numpy()
+
+    # 拼回整張圖（縮小到最長邊 800px 以減少傳輸量），重疊處取平均，全圖統一正規化
+    scale = min(1.0, 800 / max(img_bw.size))
+    W, H = max(1, round(img_bw.width * scale)), max(1, round(img_bw.height * scale))
+    total, count = np.zeros((H, W), np.float32), np.zeros((H, W), np.float32)
+    for cam, (left, top, right, bottom) in zip(cams, boxes):
+        x0, y0, x1, y1 = (round(v * scale) for v in (left, top, right, bottom))
+        if x1 > x0 and y1 > y0:
+            total[y0:y1, x0:x1] += cv2.resize(cam, (x1 - x0, y1 - y0))
+            count[y0:y1, x0:x1] += 1
+    cam = total / np.maximum(count, 1)
     if cam.max() > 0:
         cam = cam / cam.max()
 
-    # 疊在灰階原圖上，並縮小到最長邊 800px 以減少傳輸量
-    base = np.array(base_img.convert('RGB'))
-    scale = min(1.0, 800 / max(base.shape[:2]))
-    size = (max(1, round(base.shape[1] * scale)), max(1, round(base.shape[0] * scale)))
-    base = cv2.resize(base, size, interpolation=cv2.INTER_AREA)
-    cam = cv2.resize(cam, size)
+    # 疊在灰階原圖上
+    base = cv2.resize(np.array(img_bw), (W, H), interpolation=cv2.INTER_AREA)
     colored = cv2.cvtColor(cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
     overlay = (0.5 * base + 0.5 * colored).astype(np.uint8)
 
@@ -236,15 +246,14 @@ async def predict(
 
     contents = await file.read()
     try:
-        img = Image.open(io.BytesIO(contents)).convert('RGB')
+        # 💡 讀圖方式與訓練相同：依 EXIF 轉正後轉灰階
+        img_bw = load_gray(contents)
     except Exception:
         return JSONResponse({"error": "invalid image"}, status_code=400)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 💡 1. 決定最終要用的 milling_type (加入 AI 自信度偵測)
-    img_bw = img.convert('L').convert('RGB')
-
     ai_confidence = 1.0      # 初始化自信度
     ai_is_confused = False   # 初始化困惑狀態
 
@@ -253,8 +262,9 @@ async def predict(
         if classifier_model is not None:
             classifier_model.to(device)
             with torch.no_grad():
-                img_tensor = transform(img_bw).unsqueeze(0).to(device)
-                out = classifier_model(img_tensor)
+                # 💡 均勻取 3x3 個方塊，輸出取平均後再判斷（與訓練時的驗證方式相同）
+                patches = torch.stack([to_input(img_bw.crop(box)) for box in grid_boxes(img_bw)]).to(device)
+                out = classifier_model(patches).mean(dim=0, keepdim=True)
 
                 probs = torch.nn.functional.softmax(out, dim=1)
                 max_prob = torch.max(probs).item()
@@ -289,24 +299,14 @@ async def predict(
         used_default = True
     dummy_condition = 0.0
 
-    img_color_np = np.array(img)
-    img_cv = cv2.cvtColor(img_color_np, cv2.COLOR_RGB2BGR)
-    img_bw = img.convert('L').convert('RGB')
-    img_np = np.array(img_bw)
-    h, w, _ = img_np.shape
-
     num_patches = 32
-    crop_h, crop_w = int(h * 0.8), int(w * 0.8)
-    patches, patch_coords = [], []
+    # 💡 從原始解析度隨機切 32 個固定大小的方塊（放大倍率與訓練時相同）；
+    #    取樣位置由影像內容決定，同一張照片每次預測的結果都相同
+    rng = random.Random(zlib.crc32(contents))
+    boxes = [random_box(img_bw, rng) for _ in range(num_patches)]
+    patch_coords = [{"top": top, "left": left, "bottom": bottom, "right": right} for left, top, right, bottom in boxes]
 
-    for _ in range(num_patches):
-        top = random.randint(0, h - crop_h)
-        left = random.randint(0, w - crop_w)
-        patch_coords.append({"top": top, "left": left, "bottom": top + crop_h, "right": left + crop_w})
-        patch_arr = img_np[top:top+crop_h, left:left+crop_w]
-        patches.append(Image.fromarray(patch_arr))
-
-    batch_tensors = torch.stack([transform(p) for p in patches]).to(device)
+    batch_tensors = torch.stack([to_input(img_bw.crop(box)) for box in boxes]).to(device)
     params_tensor = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]] * num_patches, dtype=torch.float32).to(device)
 
     with torch.no_grad():
@@ -337,6 +337,10 @@ async def predict(
             status = "保留 (有效計算區間)"
         detailed_patches.append({"id": i + 1, "ra": float(val), "status": status, "coords": coords})
 
+    # 💡 這次用到的模型若是用舊版前處理訓練的，提醒使用者重新訓練
+    used_roles = [final_milling_type] + (["Classifier"] if milling_type == "Auto" and classifier_model is not None else [])
+    preprocess_mismatch = any(model_preprocess.get(role) != PREPROCESS_VERSION for role in used_roles)
+
     result = {
         "ra": final_ra,
         "used_default_params": used_default,
@@ -345,18 +349,19 @@ async def predict(
         "preds_edge": edge_score,
         "ai_confidence": ai_confidence,  # 💡 修改點 2：把 AI 的自信度數據打包傳給網頁
         "detected_milling": final_milling_type,
+        "preprocess_mismatch": preprocess_mismatch,
         "xai_details": {
             "num_patches": num_patches,
             "trim_count": trim_count,
+            "patch_size": patch_side(img_bw),
             "patches_info": detailed_patches
         }
     }
 
-    # 🎨 Grad-CAM：用整張灰階影像分析模型主要看哪些區域
+    # 🎨 Grad-CAM：逐塊分析後拼回整張圖，標出模型主要看哪些區域
     if gradcam:
         try:
-            img_tensor = transform(img_bw).unsqueeze(0).to(device)
-            result['heatmap'] = compute_gradcam(target_model, img_tensor, params_tensor[:1], img_bw)
+            result['heatmap'] = compute_gradcam(target_model, img_bw, params_tensor[:1])
         except Exception as e:
             result['heatmap_error'] = str(e)
 
@@ -515,22 +520,30 @@ async def admin_stats():
 # ==========================================
 # 🔄 5. 模型版本管理 (熱切換 / Rollback)
 # ==========================================
+def preprocess_ok(role, meta):
+    """傳統 RF 不受影像前處理影響；深度學習模型必須是用目前版本的前處理訓練的"""
+    return role == "Traditional" or (meta or {}).get("preprocess") == PREPROCESS_VERSION
+
 def describe_role(role):
     current = current_path(role)
     version = version_of(current) if current.exists() else None
+    meta = read_meta(current) if version else None
+    archived = []
+    for name in list_archived(role):
+        archived_meta = read_meta(ARCHIVE_DIR / name)
+        archived.append({
+            "file": name,
+            "is_current": version is not None and name == archived_name(role, version),
+            "meta": archived_meta,
+            "preprocess_ok": preprocess_ok(role, archived_meta),
+        })
     return {
         "file": MODEL_FILES[role],
         "exists": version is not None,
         "version": version,
-        "meta": read_meta(current) if version else None,
-        "archived": [
-            {
-                "file": name,
-                "is_current": version is not None and name == archived_name(role, version),
-                "meta": read_meta(ARCHIVE_DIR / name),
-            }
-            for name in list_archived(role)
-        ],
+        "meta": meta,
+        "preprocess_ok": preprocess_ok(role, meta),
+        "archived": archived,
     }
 
 @app.get('/models')

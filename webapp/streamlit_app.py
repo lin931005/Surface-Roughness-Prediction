@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 import time
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 import io
 import os
 import random
@@ -118,17 +118,18 @@ def parse_filename_condition(filename: str):
         return None, None
     return float(match.group(1)), f"{match.group(1)}-{match.group(2)}"
 
-def describe_model_meta(meta):
+def describe_model_meta(meta, preprocess_ok=True):
     """把模型的 meta.json 整理成一行說明"""
+    warning = "" if preprocess_ok else "　⚠️ 舊版前處理，需重新訓練"
     if not meta:
-        return "（舊版模型，沒有驗證紀錄）"
+        return "（舊版模型，沒有驗證紀錄）" + warning
     if 'val_mae' in meta:
         score = f"驗證 MAE {meta['val_mae']:.4f} μm"
     elif 'val_acc' in meta:
         score = f"驗證正確率 {meta['val_acc'] * 100:.1f}%"
     else:
         score = ""
-    return f"訓練於 {meta.get('trained_at', '?')}，{score}".rstrip("，")
+    return f"訓練於 {meta.get('trained_at', '?')}，{score}".rstrip("，") + warning
 
 # ==========================================
 # 👨‍🔧 模式 A：單張檢測 (支援雙引擎切換)
@@ -164,7 +165,7 @@ if tab == '👨‍🔧 單筆影像檢測作業':
     uploaded = st.file_uploader('📸 上傳表面影像 (支援 png, jpg, jpeg)', type=['png','jpg','jpeg'])
 
     if uploaded is not None:
-        img = Image.open(uploaded).convert('RGB')
+        img = ImageOps.exif_transpose(Image.open(uploaded)).convert('RGB')  # 與後端相同，依 EXIF 轉正
         st.image(img, caption='待測工件影像', width=400)
 
         use_gc = st.checkbox('顯示 Grad-CAM 特徵啟動熱力圖 (僅支援深度學習)', value=True)
@@ -281,6 +282,8 @@ if tab == '👨‍🔧 單筆影像檢測作業':
                             display_type = "立銑 (End Milling)" if detected_type == "End_Milling" else "直銑 (躺銑) (Peripheral Milling)"
 
                             st.success(f"### ✨ 表面粗糙度估算值 (Ra): **{j.get('ra'):.4f} μm**")
+                            if j.get('preprocess_mismatch'):
+                                st.warning("⚠️ 目前上線的模型是用舊版影像前處理訓練的，請到「系統管理與模型控制台」重新訓練，否則估算值不準確。")
                             st.info(f"⚙️ 系統當前調用之特徵萃取模型：**{display_type}**")
 
                             st.markdown("#### 🔬 影像預處理與特徵萃取可視化")
@@ -307,7 +310,7 @@ if tab == '👨‍🔧 單筆影像檢測作業':
                                     coords = p['coords']
                                     color = "green" if "保留" in p['status'] else "red" if "異常高值" in p['status'] else "yellow"
                                     draw.rectangle([coords['left'], coords['top'], coords['right'], coords['bottom']], outline=color, width=4)
-                                st.image(img_with_boxes, caption='隨機取樣區域可視化 (綠框: 採用, 紅/黃框: 剔除極端值)', width='stretch')
+                                st.image(img_with_boxes, caption=f"隨機取樣區域可視化 (每個方塊 {details.get('patch_size', '?')} px；綠框: 採用, 紅/黃框: 剔除極端值)", width='stretch')
 
                                 chart_data = [{"區塊編號": f"Patch {p['id']}", "預測粗糙度 (Ra)": p['ra'], "狀態": p['status']} for p in patches_info]
                                 df = pd.DataFrame(chart_data)
@@ -338,8 +341,9 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             progress_bar = st.progress(0)
             status_text = st.empty()
             results = []
+            preprocess_mismatch = False
 
-            # 💡 讀取各模型訓練時保留的驗證工件，用來判斷哪些影像是模型真的沒看過的
+            # 💡 讀取各模型訓練時保留的驗證刀，用來判斷哪些影像是模型真的沒看過的
             try:
                 r_models = requests.get(f'{API_URL}/models', headers=HEADERS, timeout=10)
                 roles_info = r_models.json().get('roles', {}) if r_models.status_code == 200 else {}
@@ -353,7 +357,7 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
                 file_speed, condition_id = parse_filename_condition(file.name)
                 speed_used = file_speed if file_speed else float(default_speed)
 
-                # 專家模型、分類器、RF 三個模型訓練時都沒看過這個工件，比較才公平
+                # 專家模型、分類器、RF 三個模型訓練時都沒看過這一刀，比較才公平
                 if gt_type_code and condition_id:
                     cond_key = f"{gt_type_code}/{condition_id}"
                     unseen = all(cond_key in held_out.get(role, set()) for role in (gt_type_code, 'Classifier', 'Traditional'))
@@ -367,6 +371,7 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
                     r_dl = requests.post(f'{API_URL}/predict', files=files_payload_dl, params={'milling_type': 'Auto', 'speed': speed_used}, headers=HEADERS, timeout=15)
                     if r_dl.status_code == 200:
                         j_dl = r_dl.json()
+                        preprocess_mismatch |= bool(j_dl.get('preprocess_mismatch'))
                         pred_ra_dl = j_dl.get('ra')
                         abs_err_dl = abs(pred_ra_dl - gt_ra) if gt_ra else None
                         pred_type_code = j_dl.get('detected_milling')
@@ -395,7 +400,7 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
                     "條件編號": condition_id or "",
                     "主軸轉速 (RPM)": speed_used,
                     "轉速來源": "檔名" if file_speed else "預設值",
-                    "訓練時看過此工件": seen_text,
+                    "訓練時看過這一刀": seen_text,
                     "真實銑法": gt_type_text,
                     "系統判定銑法": pred_type_text,
                     "特徵置信度 (%)": round(ai_conf, 1),
@@ -409,14 +414,16 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
                 progress_bar.progress((idx + 1) / len(batch_files))
 
             status_text.text("✅ 雙引擎批量分析完畢！")
+            if preprocess_mismatch:
+                st.warning("⚠️ 目前上線的深度學習模型是用舊版影像前處理訓練的，請先重新訓練，以下深度學習的數字不準確。")
             df_res = pd.DataFrame(results)
 
             # 💡 計算 MAPE (平均相對偏差率)
             df_res['偏差率 (深度學習) (%)'] = (df_res['絕對誤差 (深度學習)'] / df_res['真實 Ra (μm)']) * 100
             df_res['偏差率 (傳統視覺) (%)'] = (df_res['絕對誤差 (傳統視覺)'] / df_res['真實 Ra (μm)']) * 100
 
-            # 💡 只用訓練時沒看過的工件計算 KPI，數字才不會偏樂觀
-            unseen_df = df_res[df_res['訓練時看過此工件'] == "否 (驗證集)"]
+            # 💡 只用訓練時沒看過的刀計算 KPI，數字才不會偏樂觀
+            unseen_df = df_res[df_res['訓練時看過這一刀'] == "否 (驗證集)"]
             scope_df = unseen_df if not unseen_df.empty else df_res
             valid_df = scope_df.dropna(subset=['真實 Ra (μm)', '預測 Ra (深度學習)', '預測 Ra (傳統視覺)'])
 
@@ -426,9 +433,9 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             st.markdown("---")
             st.markdown("### 🎯 雙引擎綜合效能 KPI 統計與銑法對照")
             if not unseen_df.empty:
-                st.success(f"✅ 以下統計只計算訓練時沒看過的 **{len(unseen_df)}** 張影像（驗證集工件），全部 {len(df_res)} 張的結果請看最下方的明細表。")
+                st.success(f"✅ 以下統計只計算訓練時沒看過的 **{len(unseen_df)}** 張影像（驗證集的刀），全部 {len(df_res)} 張的結果請看最下方的明細表。")
             else:
-                st.warning("⚠️ 這批影像的工件在訓練時都出現過（或模型是舊版本，沒有記錄保留的驗證工件），以下數字會偏樂觀。用目前的資料切分重新訓練全部模型後，明細表中「訓練時看過此工件」為「否」的影像才算公平的測試。")
+                st.warning("⚠️ 這批影像的刀在訓練時都出現過（或模型是舊版本，沒有記錄保留的驗證刀），以下數字會偏樂觀。用目前的資料切分重新訓練全部模型後，明細表中「訓練時看過這一刀」為「否」的影像才算公平的測試。")
 
             if not valid_df.empty:
                 # 總結數據
@@ -617,7 +624,7 @@ else:
                 role = st.selectbox("選擇模型", list(ROLE_LABELS), format_func=ROLE_LABELS.get)
                 info = roles_info.get(role, {})
                 if info.get('exists'):
-                    st.info(f"目前上線版本：**{info['version']}**　{describe_model_meta(info.get('meta'))}")
+                    st.info(f"目前上線版本：**{info['version']}**　{describe_model_meta(info.get('meta'), info.get('preprocess_ok', True))}")
                 else:
                     st.warning("這個模型還沒有訓練過。")
 
@@ -625,7 +632,7 @@ else:
                 if archived:
                     selected_model = st.selectbox(
                         "選擇要切換的版本", list(archived),
-                        format_func=lambda f: f"{f}{'（目前上線）' if archived[f]['is_current'] else ''}　{describe_model_meta(archived[f].get('meta'))}")
+                        format_func=lambda f: f"{f}{'（目前上線）' if archived[f]['is_current'] else ''}　{describe_model_meta(archived[f].get('meta'), archived[f].get('preprocess_ok', True))}")
                     if st.button("🌟 設為上線模型 (Deploy)", type="primary"):
                         res = requests.post(f'{API_URL}/admin/set_active_model', params={'role': role, 'model_file': selected_model}, headers=HEADERS)
                         if res.status_code == 200: st.success(res.json().get('msg'))

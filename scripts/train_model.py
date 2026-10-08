@@ -9,11 +9,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import cv2
 import numpy as np
 import torchvision.models as models
 import torchvision.transforms as transforms
-from PIL import Image
 import time
 import functools
 from datetime import datetime
@@ -33,13 +31,12 @@ EPOCHS = 200
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from project_root import str_path
 from model_versions import archive_current, current_path, write_meta
+from preprocessing import (PATCH_SIZE, EVAL_GRID, PREPROCESS_VERSION, to_input, load_gray, grid_boxes,
+                           random_train_patch)
 
 BASE_DIR = str_path()
 CSV_PATH = str_path('data', 'final_training_manifest.csv')
 RESULTS_DIR = str_path('results')
-
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
 
 # ==========================================
 # 1. 定義資料讀取器
@@ -49,20 +46,11 @@ class SurfaceDataset(Dataset):
         self.data_info = data_frame.reset_index(drop=True)
         self.is_train = is_train
 
-        self.train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.5, 1.0), ratio=(0.9, 1.1)),
+        # 💡 位置、大小與旋轉的隨機變化在 random_train_patch 裡處理，這裡只做翻轉與亮度對比
+        self.augment = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
-            transforms.RandomRotation(degrees=15),
             transforms.ColorJitter(brightness=0.3, contrast=0.3),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
-
-        self.eval_transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ])
 
     def __len__(self):
@@ -74,19 +62,17 @@ class SurfaceDataset(Dataset):
         img_path = row['image_path']
 
         try:
-            img_array = np.fromfile(img_path, dtype=np.uint8)
-            img_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            if img_cv is None:
-                raise ValueError(f"無法解碼圖片，檔案可能損壞: {img_path}")
-
-            img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-            # 💡 核心修正：將陣列轉成 PIL 圖片後，立刻轉灰階 (L) 去除色彩，再轉回三通道 (RGB)
-            img_pil = Image.fromarray(img_rgb).convert('L').convert('RGB')
+            # 💡 核心修正：讀圖後立刻轉灰階 (L) 去除色彩，再轉回三通道 (RGB)
+            img_pil = load_gray(img_path)
         except Exception as e:
             raise IOError(f"讀取圖片時發生錯誤 {img_path}: {str(e)}")
 
-        transform = self.train_transform if self.is_train else self.eval_transform
-        img_tensor = transform(img_pil)
+        # 💡 從原始解析度切固定大小的方塊再縮放，每張照片的刀痕放大倍率都相同
+        if self.is_train:
+            img_tensor = to_input(self.augment(random_train_patch(img_pil)))
+        else:
+            # 驗證：每張照片均勻取 3x3 個方塊，評估時取平均，和線上推論的做法一致
+            img_tensor = torch.stack([to_input(img_pil.crop(box)) for box in grid_boxes(img_pil)])
 
         speed = float(row['speed']) / 10000.0
         cond = 0.0 # 💡 修正：廢棄字串編號轉換，統一設為 0.0 配合推論端
@@ -137,7 +123,7 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 def evaluate(model, dataloader, criterion, device):
-    """回傳 (平均 loss, 平均絕對誤差 MAE μm)"""
+    """回傳 (平均 loss, 平均絕對誤差 MAE μm)；每張照片的多個方塊先平均成一個預測值"""
     model.eval()
     total_loss = 0.0
     total_abs_err, total_count = 0.0, 0
@@ -146,8 +132,10 @@ def evaluate(model, dataloader, criterion, device):
             imgs = imgs.to(device)
             params = params.to(device)
             targets = targets.to(device)
+            n_imgs, n_patches = imgs.shape[:2]
             with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
-                preds = model(imgs, params)
+                preds = model(imgs.flatten(0, 1), params.repeat_interleave(n_patches, dim=0))
+                preds = preds.view(n_imgs, n_patches).mean(dim=1, keepdim=True)
                 loss = criterion(preds, targets)
             total_loss += loss.item()
             total_abs_err += (preds.float() - targets).abs().sum().item()
@@ -187,13 +175,13 @@ def main():
 
     print(f"📂 成功載入 {len(data_df)} 筆 {args.milling_type} 影像資料！")
 
-    # 💡 依工件切分 (由 dataset_prepare.py 決定)：驗證集的工件訓練時完全看不到，驗證成績才不會偏樂觀
+    # 💡 依刀切分 (由 dataset_prepare.py 決定)：驗證集的刀訓練時完全看不到，驗證成績才不會偏樂觀
     train_df = data_df[data_df['split'] == 'train'].reset_index(drop=True)
     val_df = data_df[data_df['split'] == 'val'].reset_index(drop=True)
     if train_df.empty or val_df.empty:
         raise ValueError("❌ 訓練集或驗證集是空的，請檢查 dataset_prepare.py 的切分結果")
     val_conditions = sorted(val_df['condition_id'].unique())
-    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張，驗證用的工件：{', '.join(val_conditions)}")
+    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張，驗證用的刀：{', '.join(val_conditions)}")
 
     archived = archive_current(args.milling_type)
     if archived:
@@ -203,7 +191,9 @@ def main():
     val_dataset = SurfaceDataset(val_df, is_train=False)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
+    # 驗證時每張照片有 EVAL_GRID² 個方塊，批次張數相應縮小，避免顯示卡記憶體不足
+    val_loader = DataLoader(val_dataset, batch_size=max(1, BATCH_SIZE // EVAL_GRID ** 2), shuffle=False, num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
+    print(f"🔍 前處理：從原始照片切 {PATCH_SIZE}x{PATCH_SIZE} 方塊後縮成 224x224，驗證時每張照片取 {EVAL_GRID}x{EVAL_GRID} 個方塊平均")
 
     model = ResNetDualInputModel().to(device)
     criterion = nn.MSELoss()
@@ -250,7 +240,7 @@ def main():
             best_val_loss = avg_val_loss
             epochs_without_improve = 0
             torch.save(model.state_dict(), BEST_MODEL_PATH)
-            # 記錄這個版本的驗證成績與保留的驗證工件，批量驗證頁靠它判斷哪些影像是模型沒看過的
+            # 記錄這個版本的驗證成績與保留的驗證刀，批量驗證頁靠它判斷哪些影像是模型沒看過的
             write_meta(args.milling_type, {
                 'trained_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'epoch': epoch,
@@ -259,6 +249,7 @@ def main():
                 'train_images': len(train_df),
                 'val_images': len(val_df),
                 'val_conditions': [f"{args.milling_type}/{c}" for c in val_conditions],
+                'preprocess': PREPROCESS_VERSION,
             })
             print(f"  👉 已儲存最佳 {args.milling_type} 模型！")
         else:

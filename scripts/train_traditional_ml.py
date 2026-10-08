@@ -42,16 +42,16 @@ def main():
         raise ValueError("❌ CSV 缺少 split 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
     df = df[df['machining_type'] != 'Other'].dropna()
 
-    # 依工件切分 (由 dataset_prepare.py 決定)，和深度學習模型保留相同的驗證工件，比較才公平
+    # 依刀切分 (由 dataset_prepare.py 決定)，和深度學習模型保留相同的驗證刀，比較才公平
     X_train, y_train, _ = load_features(df[df['split'] == 'train'])
     X_val, y_val, val_df = load_features(df[df['split'] == 'val'])
-    print(f"🧪 訓練 {len(X_train)} 張 / 驗證 {len(X_val)} 張（驗證集的工件訓練時不會看到）")
+    print(f"🧪 訓練 {len(X_train)} 張 / 驗證 {len(X_val)} 張（驗證集的刀訓練時不會看到）")
 
     # 訓練隨機森林回歸模型
     rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
     rf_model.fit(X_train, y_train)
 
-    # 用訓練時沒看過的工件評估
+    # 用訓練時沒看過的刀評估
     abs_err = np.abs(rf_model.predict(X_val) - y_val)
     val_mae = float(abs_err.mean())
     val_mape = float((abs_err / y_val).mean() * 100)

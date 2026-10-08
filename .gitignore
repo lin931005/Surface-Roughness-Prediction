@@ -19,8 +19,10 @@ __pycache__/
 data/**/*-*/
 data/example/
 data/測試用圖片/   
-data/Other/   
-data/FURRY/   
+data/Other/
+data/FURRY/
+data/original/
+data/backup-*/
 
 # ==========================================
 # 4. 訓練產出物 (模型、日誌、預測結果)

@@ -1,10 +1,129 @@
+import hashlib
 import os
+import random
 import pandas as pd
 import sys
+from collections import Counter
 
 # 確保能讀取到上一層的 project_root
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from project_root import str_path
+
+# 驗證集比例與抽樣種子：同一份資料每次都會切出相同的驗證集
+VAL_RATIO = 0.2
+SPLIT_SEED = 42
+
+
+def condition_sort_key(condition_id):
+    # "7000-0.5" -> (7000.0, 0.5)，讓 5000-2 排在 5000-10 前面
+    return tuple(float(x) for x in condition_id.split('-'))
+
+
+def find_duplicate_photos(paths):
+    """找出內容完全相同的照片，回傳 {重複的照片: 第一次出現的照片}。
+
+    先比對檔案大小，大小相同才計算雜湊，不必把整個資料集讀過一遍。
+    """
+    by_size = {}
+    for p in paths:
+        by_size.setdefault(os.path.getsize(p), []).append(p)
+
+    first_copy = {}
+    for same_size in by_size.values():
+        if len(same_size) < 2:
+            continue
+        by_digest = {}
+        for p in same_size:
+            with open(p, 'rb') as f:
+                by_digest.setdefault(hashlib.md5(f.read()).hexdigest(), []).append(p)
+        for copies in by_digest.values():
+            for p in copies[1:]:
+                first_copy[p] = copies[0]
+    return first_copy
+
+
+def assign_split(df):
+    """依工件切分訓練集 (train) 與驗證集 (val)，驗證集的工件在訓練時完全看不到。
+
+    下列照片會分在同一組，整組一起進訓練集或驗證集：
+    - 同一個條件資料夾的照片（同一個工件）
+    - Ra 實測值相同的條件（例如 5000-7 與 5000-7.5）
+    - 內容完全相同的照片（同一張照片被放進不同資料夾）
+    分組後依「銑法 + 轉速」分層，每層抽 VAL_RATIO 的組別當驗證集；Other 沒有工件之分，逐張抽樣。
+    """
+    df = df.reset_index(drop=True)
+    labels = [
+        f"{row.machining_type}/{row.condition_id}" if row.machining_type != 'Other'
+        else f"Other/{os.path.basename(row.image_path)}"
+        for row in df.itertuples()
+    ]
+
+    # 用 union-find 把有關聯的照片併成同一組
+    parent = list(range(len(df)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first_seen = {}
+
+    def link(key, i):
+        if key in first_seen:
+            parent[find(i)] = find(first_seen[key])
+        else:
+            first_seen[key] = i
+
+    duplicates = find_duplicate_photos(df['image_path'].tolist())
+    for i, row in enumerate(df.itertuples()):
+        link(('photo', duplicates.get(row.image_path, row.image_path)), i)
+        if row.machining_type != 'Other':
+            link(('condition', labels[i]), i)
+            link(('ra', row.machining_type, row.ra_target), i)
+
+    # 同一張照片出現在 Ra 不同的條件裡，代表照片可能放錯資料夾，提醒使用者檢查
+    row_of = {p: i for i, p in enumerate(df['image_path'])}
+    conflicts = Counter()
+    for dup, original in duplicates.items():
+        a, b = row_of[dup], row_of[original]
+        if df.at[a, 'ra_target'] != df.at[b, 'ra_target']:
+            conflicts[tuple(sorted((labels[a], labels[b])))] += 1
+    for (a, b), n in sorted(conflicts.items()):
+        print(f"⚠ 有 {n} 張照片同時出現在 {a} 和 {b}，但兩邊的 Ra 標籤不同，請確認照片是否放錯資料夾。")
+
+    groups = {}
+    for i in range(len(df)):
+        groups.setdefault(find(i), []).append(i)
+
+    strata = {}
+    for members in groups.values():
+        first = min(members, key=lambda i: labels[i])
+        merged = sorted({labels[i] for i in members if df.at[i, 'machining_type'] != 'Other'})
+        if len(merged) > 1:
+            print(f"🔗 這些條件被分在同一組（照片重複或 Ra 相同）：{'、'.join(merged)}")
+        stratum = (df.at[first, 'machining_type'], df.at[first, 'speed'])
+        strata.setdefault(stratum, []).append((labels[first], members))
+
+    df['split'] = 'train'
+    for stratum, stratum_groups in sorted(strata.items()):
+        stratum_groups.sort(key=lambda g: g[0])
+        random.Random(f"{SPLIT_SEED}-{stratum[0]}-{stratum[1]}").shuffle(stratum_groups)
+        # 只有一組時全部留給訓練，否則該轉速的資料模型完全學不到
+        n_val = max(1, round(len(stratum_groups) * VAL_RATIO)) if len(stratum_groups) >= 2 else 0
+        for _, members in stratum_groups[:n_val]:
+            df.loc[members, 'split'] = 'val'
+
+    val_df = df[df['split'] == 'val']
+    print(f"🧪 驗證集共 {len(val_df)} 張（{len(val_df) / len(df):.0%}），這些工件在訓練時不會出現：")
+    for machining_type, sub in val_df.groupby('machining_type'):
+        if machining_type == 'Other':
+            print(f"   Other：{len(sub)} 張")
+        else:
+            conditions = sorted(sub['condition_id'].unique(), key=condition_sort_key)
+            print(f"   {machining_type}：{'、'.join(conditions)}（{len(sub)} 張）")
+    return df
+
 
 def generate_manifest():
     # 💡 將資料來源指向我們整理好的 Dataset_Cleaned
@@ -136,7 +255,7 @@ def generate_manifest():
                                 "ra_target": float(ra_val)
                             })
 
-    dataset_df = pd.DataFrame(all_data_rows)
+    dataset_df = assign_split(pd.DataFrame(all_data_rows))
 
     # 確保輸出的 data 目錄存在
     os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)

@@ -12,6 +12,7 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from PIL import Image
 import functools
+from datetime import datetime
 
 print = functools.partial(print, flush=True)
 
@@ -21,17 +22,17 @@ print = functools.partial(print, flush=True)
 SEED = 42
 BATCH_SIZE = 64
 NUM_WORKERS = min(8, os.cpu_count() or 4)
-VALIDATION_SPLIT = 0.2
 PATIENCE = 30
 LR = 1e-4
 EPOCHS = 100
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from project_root import str_path
+from model_versions import archive_current, current_path, write_meta
 
 CSV_PATH = str_path('data', 'final_training_manifest.csv')
 RESULTS_DIR = str_path('results')
-BEST_MODEL_PATH = os.path.join(RESULTS_DIR, 'best_classifier.pth')
+BEST_MODEL_PATH = str(current_path('Classifier'))
 LOSS_CSV_PATH = os.path.join(RESULTS_DIR, 'loss_record_Classifier.csv')
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -134,14 +135,21 @@ def main():
     df = pd.read_csv(CSV_PATH)
     if df.empty or 'machining_type' not in df.columns:
         raise ValueError("❌ CSV 格式錯誤或無資料")
+    if 'split' not in df.columns:
+        raise ValueError("❌ CSV 缺少 split 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
 
-    # 洗牌並切割訓練與驗證集
-    df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
-    val_size = max(1, int(len(df) * VALIDATION_SPLIT))
-    train_df = df.iloc[val_size:].reset_index(drop=True)
-    val_df = df.iloc[:val_size].reset_index(drop=True)
+    # 依工件切分 (由 dataset_prepare.py 決定)：驗證集的工件訓練時完全看不到
+    train_df = df[df['split'] == 'train'].reset_index(drop=True)
+    val_df = df[df['split'] == 'val'].reset_index(drop=True)
+    val_milling = val_df[val_df['machining_type'] != 'Other']
+    val_conditions = sorted({f"{t}/{c}" for t, c in zip(val_milling['machining_type'], val_milling['condition_id'])})
 
     print(f"📂 成功載入 {len(df)} 筆影像資料！(包含立銑、直銑與 Other 負面教材)")
+    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張（驗證集的工件訓練時不會看到）")
+
+    archived = archive_current('Classifier')
+    if archived:
+        print(f"🗄️ 舊版模型已備份為 results/archive/{archived}")
 
     train_loader = DataLoader(ClassifierDataset(train_df, True), batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     val_loader = DataLoader(ClassifierDataset(val_df, False), batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
@@ -186,6 +194,15 @@ def main():
             best_val_loss = avg_val_loss
             epochs_without_improve = 0
             torch.save(model.state_dict(), BEST_MODEL_PATH)
+            write_meta('Classifier', {
+                'trained_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'epoch': epoch,
+                'val_loss': avg_val_loss,
+                'val_acc': val_acc,
+                'train_images': len(train_df),
+                'val_images': len(val_df),
+                'val_conditions': val_conditions,
+            })
             print("  👉 已儲存最佳分類器模型！")
         else:
             epochs_without_improve += 1

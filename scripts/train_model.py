@@ -16,6 +16,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 import time
 import functools
+from datetime import datetime
 
 print = functools.partial(print, flush=True)
 
@@ -25,13 +26,13 @@ print = functools.partial(print, flush=True)
 SEED = 42
 BATCH_SIZE = 64
 NUM_WORKERS = min(8, os.cpu_count() or 4)
-VALIDATION_SPLIT = 0.2
 PATIENCE = 40
 LR = 1e-4
 EPOCHS = 200
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from project_root import str_path
+from model_versions import archive_current, current_path, write_meta
 
 BASE_DIR = str_path()
 CSV_PATH = str_path('data', 'final_training_manifest.csv')
@@ -136,8 +137,10 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 def evaluate(model, dataloader, criterion, device):
+    """回傳 (平均 loss, 平均絕對誤差 MAE μm)"""
     model.eval()
     total_loss = 0.0
+    total_abs_err, total_count = 0.0, 0
     with torch.no_grad():
         for imgs, params, targets in dataloader:
             imgs = imgs.to(device)
@@ -147,7 +150,9 @@ def evaluate(model, dataloader, criterion, device):
                 preds = model(imgs, params)
                 loss = criterion(preds, targets)
             total_loss += loss.item()
-    return total_loss / len(dataloader)
+            total_abs_err += (preds.float() - targets).abs().sum().item()
+            total_count += targets.size(0)
+    return total_loss / len(dataloader), total_abs_err / total_count
 
 def main():
     parser = argparse.ArgumentParser()
@@ -164,13 +169,15 @@ def main():
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     # 💡 動態命名輸出檔案
-    BEST_MODEL_PATH = os.path.join(RESULTS_DIR, f'best_model_{args.milling_type}.pth')
+    BEST_MODEL_PATH = str(current_path(args.milling_type))
     LOSS_CSV_PATH = os.path.join(RESULTS_DIR, f'loss_record_{args.milling_type}.csv')
 
     if not os.path.exists(CSV_PATH):
         raise FileNotFoundError(f"找不到 CSV 檔案：{CSV_PATH}")
 
     data_df = pd.read_csv(CSV_PATH)
+    if 'split' not in data_df.columns:
+        raise ValueError("❌ CSV 缺少 split 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
 
     # 💡 核心過濾：只挑選符合當前 milling_type 的資料來訓練！
     data_df = data_df[data_df['machining_type'] == args.milling_type].copy()
@@ -180,10 +187,17 @@ def main():
 
     print(f"📂 成功載入 {len(data_df)} 筆 {args.milling_type} 影像資料！")
 
-    data_df = data_df.sample(frac=1, random_state=SEED).reset_index(drop=True)
-    val_size = max(1, int(len(data_df) * VALIDATION_SPLIT))
-    train_df = data_df.iloc[val_size:].reset_index(drop=True)
-    val_df = data_df.iloc[:val_size].reset_index(drop=True)
+    # 💡 依工件切分 (由 dataset_prepare.py 決定)：驗證集的工件訓練時完全看不到，驗證成績才不會偏樂觀
+    train_df = data_df[data_df['split'] == 'train'].reset_index(drop=True)
+    val_df = data_df[data_df['split'] == 'val'].reset_index(drop=True)
+    if train_df.empty or val_df.empty:
+        raise ValueError("❌ 訓練集或驗證集是空的，請檢查 dataset_prepare.py 的切分結果")
+    val_conditions = sorted(val_df['condition_id'].unique())
+    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張，驗證用的工件：{', '.join(val_conditions)}")
+
+    archived = archive_current(args.milling_type)
+    if archived:
+        print(f"🗄️ 舊版模型已備份為 results/archive/{archived}")
 
     train_dataset = SurfaceDataset(train_df, is_train=True)
     val_dataset = SurfaceDataset(val_df, is_train=False)
@@ -222,20 +236,30 @@ def main():
             train_loss += loss.item()
 
         avg_train_loss = train_loss / len(train_loader)
-        avg_val_loss = evaluate(model, val_loader, criterion, device)
+        avg_val_loss, val_mae = evaluate(model, val_loader, criterion, device)
         scheduler.step(avg_val_loss)
 
-        stats.append({'epoch': epoch, 'train_loss': avg_train_loss, 'val_loss': avg_val_loss})
+        stats.append({'epoch': epoch, 'train_loss': avg_train_loss, 'val_loss': avg_val_loss, 'val_mae': val_mae})
 
-        print(f"第 {epoch:02d}/{EPOCHS} 回合 | {args.milling_type} | train_loss: {avg_train_loss:.4f} | val_loss: {avg_val_loss:.4f}")
+        print(f"第 {epoch:02d}/{EPOCHS} 回合 | {args.milling_type} | train_loss: {avg_train_loss:.4f} | val_loss: {avg_val_loss:.4f} | val_mae: {val_mae:.4f} μm")
 
         import json
-        print(json.dumps({'epoch': epoch, 'train_loss': avg_train_loss, 'val_loss': avg_val_loss}))
+        print(json.dumps({'epoch': epoch, 'train_loss': avg_train_loss, 'val_loss': avg_val_loss, 'val_mae': val_mae}))
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_without_improve = 0
             torch.save(model.state_dict(), BEST_MODEL_PATH)
+            # 記錄這個版本的驗證成績與保留的驗證工件，批量驗證頁靠它判斷哪些影像是模型沒看過的
+            write_meta(args.milling_type, {
+                'trained_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'epoch': epoch,
+                'val_loss': avg_val_loss,
+                'val_mae': val_mae,
+                'train_images': len(train_df),
+                'val_images': len(val_df),
+                'val_conditions': [f"{args.milling_type}/{c}" for c in val_conditions],
+            })
             print(f"  👉 已儲存最佳 {args.milling_type} 模型！")
         else:
             epochs_without_improve += 1

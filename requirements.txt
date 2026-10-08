@@ -1,3 +1,22 @@
+# Runtime (執行系統需要的套件，版本為目前開發環境實測可用的版本)
+# 有 NVIDIA GPU 時，請先依 README 安裝 CUDA 版的 torch / torchvision
+torch==2.13.0
+torchvision==0.28.0
+fastapi==0.141.1
+uvicorn==0.52.4
+python-multipart==0.0.32
+python-dotenv==1.2.2
+streamlit==1.62.0
+altair==6.2.2
+pandas==2.3.3
+numpy==2.2.6
+scikit-learn==1.7.2
+joblib==1.6.0
+opencv-python==5.0.0.93
+pillow==12.3.0
+psutil==7.2.2
+requests==2.34.2
+
 # Testing & Debugging
 pytest>=7.0
 pytest-cov>=4.0
@@ -14,7 +33,3 @@ mypy>=1.0
 ipython>=8.0
 jupyter>=1.0
 nbconvert>=7.0
-
-# Utilities
-requests>=2.31
-opencv-python>=4.8

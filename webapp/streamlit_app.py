@@ -8,23 +8,45 @@ import io
 import os
 import random
 import re
+import secrets
 import altair as alt
+from dotenv import load_dotenv
 
 # ==========================================
 # 🌐 全域變數設定
 # ==========================================
 API_URL = "http://127.0.0.1:2578"
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+# 🔒 密碼與 API 金鑰從專案根目錄的 .env 讀取，不寫死在程式碼裡
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+API_SECRET_KEY = os.environ.get("CNC_API_KEY", "")
+ADMIN_PASSWORD = os.environ.get("CNC_ADMIN_PASSWORD", "")
+USER_PASSWORD = os.environ.get("CNC_USER_PASSWORD", "")
+HEADERS = {'X-API-Key': API_SECRET_KEY}
+
+# 各模型在介面上顯示的名稱
+ROLE_LABELS = {
+    "End_Milling": "立銑回歸模型",
+    "Peripheral_Milling": "直銑回歸模型",
+    "Classifier": "銑法分類器",
+    "Traditional": "傳統視覺 (Random Forest)",
+}
 
 # ==========================================
 # 🎨 網頁基礎與標題設定
 # ==========================================
 st.set_page_config(page_title='CNC 表面粗糙度自動化檢測系統', page_icon="⚙️", layout='wide')
 
+if not (API_SECRET_KEY and ADMIN_PASSWORD and USER_PASSWORD):
+    st.error("⚠️ 系統尚未設定密碼與 API 金鑰：請參考專案根目錄的 .env.example 建立 .env，再重新啟動系統。")
+    st.stop()
+
 # ==========================================
 # 🔒 系統安全登入驗證區塊 (純密碼分級制)
 # ==========================================
-ADMIN_PASSWORD = "lin10052578"
-USER_PASSWORD = "chen940422"
+def password_matches(entered: str, expected: str) -> bool:
+    return secrets.compare_digest(entered.encode('utf-8'), expected.encode('utf-8'))
 
 if 'role' not in st.session_state:
     st.session_state['role'] = None
@@ -38,10 +60,10 @@ if st.session_state['role'] is None:
             pwd_input = st.text_input("系統通行密碼 (Password)", type="password", help="輸入不同密碼將解鎖不同權限")
             submitted = st.form_submit_button("解鎖系統", use_container_width=True, type="primary")
             if submitted:
-                if pwd_input == ADMIN_PASSWORD:
+                if password_matches(pwd_input, ADMIN_PASSWORD):
                     st.session_state['role'] = 'admin'
                     st.rerun()
-                elif pwd_input == USER_PASSWORD:
+                elif password_matches(pwd_input, USER_PASSWORD):
                     st.session_state['role'] = 'user'
                     st.rerun()
                 else:
@@ -88,6 +110,25 @@ def parse_filename_gt(filename: str):
     if matches:
         gt_ra = float(matches[-1])
     return gt_type_code, gt_type_text, gt_ra
+
+def parse_filename_condition(filename: str):
+    """從檔名讀取主軸轉速與條件編號，例如「直銑_7000-0.5_2.3746.jpg」→ (7000.0, '7000-0.5')"""
+    match = re.search(r'(?<![\d.])(\d{4,5})-(\d+(?:\.\d+)?)(?![\d.\-])', filename)
+    if not match or not 1000 <= int(match.group(1)) <= 10000:
+        return None, None
+    return float(match.group(1)), f"{match.group(1)}-{match.group(2)}"
+
+def describe_model_meta(meta):
+    """把模型的 meta.json 整理成一行說明"""
+    if not meta:
+        return "（舊版模型，沒有驗證紀錄）"
+    if 'val_mae' in meta:
+        score = f"驗證 MAE {meta['val_mae']:.4f} μm"
+    elif 'val_acc' in meta:
+        score = f"驗證正確率 {meta['val_acc'] * 100:.1f}%"
+    else:
+        score = ""
+    return f"訓練於 {meta.get('trained_at', '?')}，{score}".rstrip("，")
 
 # ==========================================
 # 👨‍🔧 模式 A：單張檢測 (支援雙引擎切換)
@@ -160,7 +201,7 @@ if tab == '👨‍🔧 單筆影像檢測作業':
                     else:
                         api_endpoint = f'{API_URL}/predict/traditional'
 
-                    r = requests.post(api_endpoint, files=files, params=params, timeout=30)
+                    r = requests.post(api_endpoint, files=files, params=params, headers=HEADERS, timeout=30)
 
                     if r.status_code == 200:
                         j = r.json()
@@ -250,7 +291,9 @@ if tab == '👨‍🔧 單筆影像檢測作業':
                             st.info(f"📊 **系統狀態面板**：特徵置信度 (Confidence): **{ai_conf:.1f}%**")
 
                             if j.get('heatmap') and use_gc:
-                                st.image(j.get('heatmap'), caption='Grad-CAM 表面紋理熱力圖', width='stretch')
+                                st.image(j.get('heatmap'), caption='Grad-CAM 表面紋理熱力圖 (越紅的區域對 Ra 預測值影響越大)', width='stretch')
+                            elif j.get('heatmap_error') and use_gc:
+                                st.warning(f"熱力圖產生失敗：{j['heatmap_error']}")
 
                             if 'xai_details' in j:
                                 details = j['xai_details']
@@ -283,9 +326,10 @@ if tab == '👨‍🔧 單筆影像檢測作業':
 # ==========================================
 elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
     st.subheader('🧪 批量測試與雙引擎模型對決')
-    st.info('💡 **使用說明**：上傳多張影像，系統將同時啟動「深度學習」與「傳統視覺」引擎，並對比兩者之精準度。')
+    st.info('💡 **使用說明**：上傳多張影像，系統將同時啟動「深度學習」與「傳統視覺」引擎，並對比兩者之精準度。檔名建議使用「直銑_7000-3_1.565.jpg」的格式，系統會從檔名讀取銑法、轉速與真實 Ra。')
 
     batch_files = st.file_uploader('📸 批量上傳測試影像 (可按 Ctrl+A 全選上傳)', type=['png','jpg','jpeg'], accept_multiple_files=True)
+    default_speed = st.number_input("檔名沒有轉速時使用的主軸轉速 (RPM)", min_value=1000, max_value=10000, value=5000, step=100)
 
     if batch_files:
         st.success(f"📂 已成功載入 **{len(batch_files)}** 張待測影像！")
@@ -295,14 +339,32 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             status_text = st.empty()
             results = []
 
+            # 💡 讀取各模型訓練時保留的驗證工件，用來判斷哪些影像是模型真的沒看過的
+            try:
+                r_models = requests.get(f'{API_URL}/models', headers=HEADERS, timeout=10)
+                roles_info = r_models.json().get('roles', {}) if r_models.status_code == 200 else {}
+            except Exception:
+                roles_info = {}
+            held_out = {role: set(((info or {}).get('meta') or {}).get('val_conditions', [])) for role, info in roles_info.items()}
+
             for idx, file in enumerate(batch_files):
                 status_text.text(f"⏳ 雙引擎運算中：第 ({idx+1}/{len(batch_files)}) 筆影像...")
                 gt_type_code, gt_type_text, gt_ra = parse_filename_gt(file.name)
+                file_speed, condition_id = parse_filename_condition(file.name)
+                speed_used = file_speed if file_speed else float(default_speed)
+
+                # 專家模型、分類器、RF 三個模型訓練時都沒看過這個工件，比較才公平
+                if gt_type_code and condition_id:
+                    cond_key = f"{gt_type_code}/{condition_id}"
+                    unseen = all(cond_key in held_out.get(role, set()) for role in (gt_type_code, 'Classifier', 'Traditional'))
+                    seen_text = "否 (驗證集)" if unseen else "是"
+                else:
+                    seen_text = "❓ 未知"
 
                 # --- 1. 深度學習引擎 ---
                 files_payload_dl = {'file': (file.name, file.getvalue(), 'image/jpeg')}
                 try:
-                    r_dl = requests.post(f'{API_URL}/predict', files=files_payload_dl, params={'milling_type': 'Auto'}, timeout=15)
+                    r_dl = requests.post(f'{API_URL}/predict', files=files_payload_dl, params={'milling_type': 'Auto', 'speed': speed_used}, headers=HEADERS, timeout=15)
                     if r_dl.status_code == 200:
                         j_dl = r_dl.json()
                         pred_ra_dl = j_dl.get('ra')
@@ -319,7 +381,7 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
                 # --- 2. 傳統視覺引擎 ---
                 files_payload_ml = {'file': (file.name, file.getvalue(), 'image/jpeg')}
                 try:
-                    r_ml = requests.post(f'{API_URL}/predict/traditional', files=files_payload_ml, timeout=15)
+                    r_ml = requests.post(f'{API_URL}/predict/traditional', files=files_payload_ml, headers=HEADERS, timeout=15)
                     if r_ml.status_code == 200:
                         pred_ra_ml = r_ml.json().get('ra')
                         abs_err_ml = abs(pred_ra_ml - gt_ra) if gt_ra else None
@@ -330,6 +392,10 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
 
                 results.append({
                     "圖片檔名": file.name,
+                    "條件編號": condition_id or "",
+                    "主軸轉速 (RPM)": speed_used,
+                    "轉速來源": "檔名" if file_speed else "預設值",
+                    "訓練時看過此工件": seen_text,
                     "真實銑法": gt_type_text,
                     "系統判定銑法": pred_type_text,
                     "特徵置信度 (%)": round(ai_conf, 1),
@@ -349,17 +415,24 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
             df_res['偏差率 (深度學習) (%)'] = (df_res['絕對誤差 (深度學習)'] / df_res['真實 Ra (μm)']) * 100
             df_res['偏差率 (傳統視覺) (%)'] = (df_res['絕對誤差 (傳統視覺)'] / df_res['真實 Ra (μm)']) * 100
 
-            valid_df = df_res.dropna(subset=['真實 Ra (μm)', '預測 Ra (深度學習)', '預測 Ra (傳統視覺)'])
+            # 💡 只用訓練時沒看過的工件計算 KPI，數字才不會偏樂觀
+            unseen_df = df_res[df_res['訓練時看過此工件'] == "否 (驗證集)"]
+            scope_df = unseen_df if not unseen_df.empty else df_res
+            valid_df = scope_df.dropna(subset=['真實 Ra (μm)', '預測 Ra (深度學習)', '預測 Ra (傳統視覺)'])
 
             # ==========================================
             # 🎯 雙引擎對決 KPI 統計儀表板 (究極細分版)
             # ==========================================
             st.markdown("---")
             st.markdown("### 🎯 雙引擎綜合效能 KPI 統計與銑法對照")
+            if not unseen_df.empty:
+                st.success(f"✅ 以下統計只計算訓練時沒看過的 **{len(unseen_df)}** 張影像（驗證集工件），全部 {len(df_res)} 張的結果請看最下方的明細表。")
+            else:
+                st.warning("⚠️ 這批影像的工件在訓練時都出現過（或模型是舊版本，沒有記錄保留的驗證工件），以下數字會偏樂觀。用目前的資料切分重新訓練全部模型後，明細表中「訓練時看過此工件」為「否」的影像才算公平的測試。")
 
             if not valid_df.empty:
                 # 總結數據
-                type_checked = df_res[df_res['銑法辨識'] != "❓ 未知"]
+                type_checked = scope_df[scope_df['銑法辨識'] != "❓ 未知"]
                 acc = (type_checked['銑法辨識'] == "✅ 正確").mean() * 100 if not type_checked.empty else 0.0
 
                 # --- 深度學習 (DL) 數據 ---
@@ -383,7 +456,7 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
                 # --- 區塊 1：總覽 ---
                 st.markdown("#### 🏆 第一階段：AI 銑法辨識與測試總覽")
                 c1, c2 = st.columns(2)
-                c1.metric("📸 測試樣本總數", f"{len(df_res)} 張")
+                c1.metric("📸 測試樣本總數", f"{len(scope_df)} 張")
                 c2.metric("👁️ 深度學習銑法辨識正確率", f"{acc:.1f} %")
 
                 # --- 區塊 2：深度學習引擎 ---
@@ -433,7 +506,16 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
 
                 st.altair_chart(bar_chart)
 
-                st.info("💡 **實驗洞察**：從上方誤差圖表可明顯看出，傳統影像處理演算法 (紅柱) 受到機台光源與切削液干擾，誤差顯著偏高；而深度學習專家模型 (藍柱) 則能穩定且精準地估算真實表面粗糙度。這驗證了導入深度學習的必要性。")
+                # 💡 結論依本批實際數字產生，不預設哪個引擎比較好
+                if pd.notna(dl_mae) and pd.notna(ml_mae):
+                    if dl_mae < ml_mae:
+                        verdict = f"深度學習的平均誤差較低，比傳統視覺少 {ml_mae - dl_mae:.4f} μm"
+                    elif ml_mae < dl_mae:
+                        verdict = f"傳統視覺的平均誤差較低，比深度學習少 {dl_mae - ml_mae:.4f} μm"
+                    else:
+                        verdict = "兩個引擎的平均誤差相同"
+                    caution = "；樣本少於 10 張，差距不一定有代表性" if len(valid_df) < 10 else ""
+                    st.info(f"💡 **本批結果**：深度學習 MAE {dl_mae:.4f} μm、傳統視覺 MAE {ml_mae:.4f} μm，{verdict}{caution}。")
 
             # ==========================================
             # 📋 明細與匯出
@@ -454,40 +536,38 @@ elif tab == '🧪 批量驗證與精度分析 (Batch Evaluation)':
 # 👑 模式 C：系統管理員 (MLOps 中控台)
 # ==========================================
 else:
-    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     st.subheader('👑 系統管理與模型控制台')
-    API_SECRET_KEY = "super_secret_cnc_key_2026"
-    headers = {'X-API-Key': API_SECRET_KEY}
 
     tab_train, tab_model, tab_data, tab_history, tab_stats = st.tabs([
         "🚀 訓練與終端機", "🤖 模型熱切換", "📊 資料集分析", "📜 預測紀錄與稽核", "🖥️ 硬體監控"
     ])
 
+    def start_training(milling_type):
+        try:
+            res = requests.post(f"{API_URL}/train", params={'milling_type': milling_type}, headers=HEADERS)
+            if res.status_code == 200: st.success(res.json().get("message", "指令發送成功"))
+            else: st.error(f"啟動失敗 (狀態碼 {res.status_code})：{res.text}")
+        except Exception as e: st.error(str(e))
+
     with tab_train:
         st.markdown("#### 🚀 啟動模型訓練管線 (Training Pipeline)")
-        col_btn1, col_btn2, col_btn3 = st.columns(3)
+        col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
         with col_btn1:
             if st.button("⚙️ 啟動【立銑】回歸模型訓練", use_container_width=True, type="primary"):
-                try:
-                    res = requests.post(f"{API_URL}/train?milling_type=End_Milling", headers=headers)
-                    st.success(res.json().get("message", "指令發送成功"))
-                except Exception as e: st.error(str(e))
+                start_training("End_Milling")
         with col_btn2:
             if st.button("⚙️ 啟動【直銑】回歸模型訓練", use_container_width=True, type="primary"):
-                try:
-                    res = requests.post(f"{API_URL}/train?milling_type=Peripheral_Milling", headers=headers)
-                    st.success(res.json().get("message", "指令發送成功"))
-                except Exception as e: st.error(str(e))
+                start_training("Peripheral_Milling")
         with col_btn3:
             if st.button("📊 啟動【銑法分類器】模型訓練", use_container_width=True):
-                try:
-                    res = requests.post(f"{API_URL}/train?milling_type=Classifier", headers=headers)
-                    st.success(res.json().get("message", "指令發送成功"))
-                except Exception as e: st.error(str(e))
+                start_training("Classifier")
+        with col_btn4:
+            if st.button("🌲 啟動【傳統視覺 RF】模型訓練", use_container_width=True):
+                start_training("Traditional")
 
         st.markdown("---")
         try:
-            r = requests.get(f'{API_URL}/train_logs', headers=headers)
+            r = requests.get(f'{API_URL}/train_logs', headers=HEADERS)
             logs = r.json().get('logs', [])
         except Exception: logs = []
 
@@ -511,14 +591,14 @@ else:
                 term_placeholder = col_term.empty()
                 while st.session_state.get('monitor') == sel:
                     try:
-                        r_prog = requests.get(f'{API_URL}/train_progress/{sel}', headers=headers, timeout=3)
+                        r_prog = requests.get(f'{API_URL}/train_progress/{sel}', headers=HEADERS, timeout=3)
                         progress = r_prog.json().get('progress', []) if r_prog.status_code == 200 else []
                         if progress:
                             df = pd.DataFrame(progress).set_index('epoch')
                             chart_placeholder.line_chart(df[['train_loss','val_loss']])
                     except: pass
                     try:
-                        r_text = requests.get(f'{API_URL}/train_logs/{sel}', headers=headers, timeout=3)
+                        r_text = requests.get(f'{API_URL}/train_logs/{sel}', headers=HEADERS, timeout=3)
                         if r_text.status_code == 200:
                             log_text = r_text.json().get('log', '')
                             lines = log_text.split('\n')
@@ -529,16 +609,30 @@ else:
 
     with tab_model:
         st.markdown("#### 🔄 模型版本控制 (Rollback)")
+        st.caption("每次重新訓練或切換版本前，系統會自動把當時的線上版本備份到 results/archive/，之後可以在這裡換回來。")
         try:
-            r_models = requests.get(f'{API_URL}/models')
+            r_models = requests.get(f'{API_URL}/models', headers=HEADERS)
             if r_models.status_code == 200:
-                model_list = [m['file'] for m in r_models.json().get('models', [])]
-                if model_list:
-                    selected_model = st.selectbox("選擇要載入的歷史模型檔案", model_list)
+                roles_info = r_models.json().get('roles', {})
+                role = st.selectbox("選擇模型", list(ROLE_LABELS), format_func=ROLE_LABELS.get)
+                info = roles_info.get(role, {})
+                if info.get('exists'):
+                    st.info(f"目前上線版本：**{info['version']}**　{describe_model_meta(info.get('meta'))}")
+                else:
+                    st.warning("這個模型還沒有訓練過。")
+
+                archived = {a['file']: a for a in info.get('archived', [])}
+                if archived:
+                    selected_model = st.selectbox(
+                        "選擇要切換的版本", list(archived),
+                        format_func=lambda f: f"{f}{'（目前上線）' if archived[f]['is_current'] else ''}　{describe_model_meta(archived[f].get('meta'))}")
                     if st.button("🌟 設為上線模型 (Deploy)", type="primary"):
-                        res = requests.post(f'{API_URL}/admin/set_active_model', params={'model_file': selected_model}, headers=headers)
+                        res = requests.post(f'{API_URL}/admin/set_active_model', params={'role': role, 'model_file': selected_model}, headers=HEADERS)
                         if res.status_code == 200: st.success(res.json().get('msg'))
-                        else: st.error(res.json().get('error'))
+                        else: st.error(res.json().get('error') or res.text)
+                else:
+                    st.caption("目前還沒有備份的舊版本，重新訓練一次後就會出現。")
+            else: st.error(f"獲取模型清單失敗 (狀態碼 {r_models.status_code})：{r_models.text}")
         except Exception as e: st.error(f"獲取模型清單失敗: {e}")
 
     with tab_data:
@@ -579,7 +673,7 @@ else:
         st.markdown("#### 🖥️ 伺服器即時狀態")
         if st.button('🔄 重新整理狀態', type="primary"):
             try:
-                s = requests.get(f'{API_URL}/admin/stats', headers=headers)
+                s = requests.get(f'{API_URL}/admin/stats', headers=HEADERS)
                 if s.status_code == 200:
                     stats = s.json()
                     col1, col2, col3 = st.columns(3)

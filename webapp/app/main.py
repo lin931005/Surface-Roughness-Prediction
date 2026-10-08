@@ -18,12 +18,11 @@ import pandas as pd
 import psutil
 import base64
 import numpy as np
-import matplotlib
 import random
 import asyncio
 import gc
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import secrets
+from dotenv import load_dotenv
 from fastapi import Security, HTTPException, status
 from fastapi.security import APIKeyHeader
 
@@ -34,44 +33,58 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 MODELS_DIR = os.path.join(BASE_DIR, 'results')
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-MODEL_END_PATH = os.path.join(MODELS_DIR, 'best_model_End_Milling.pth')
-MODEL_PERI_PATH = os.path.join(MODELS_DIR, 'best_model_Peripheral_Milling.pth')
-CLASSIFIER_PATH = os.path.join(MODELS_DIR, 'best_classifier.pth')
+# 讓後端能 import 專案根目錄的共用模組
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+from model_versions import (MODEL_FILES, ARCHIVE_DIR, current_path, read_meta, version_of,
+                            archived_name, list_archived, deploy_archived)
 
 # ==========================================
-# 🤖 2. 載入傳統機器學習引擎
+# 🔒 API 金鑰：從專案根目錄的 .env 讀取，不寫死在程式碼裡
 # ==========================================
-try:
-    # 💡 這裡改用剛剛定義好的 MODELS_DIR
-    RF_MODEL = joblib.load(os.path.join(MODELS_DIR, 'traditional_rf_model.joblib'))
-    print("✅ 傳統 Random Forest 引擎載入成功")
-except Exception as e:
-    RF_MODEL = None
-    print(f"⚠ 找不到傳統模型或發生錯誤: {e}")
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+API_SECRET_KEY = os.environ.get("CNC_API_KEY", "")
+if not API_SECRET_KEY:
+    raise RuntimeError("找不到 CNC_API_KEY：請參考 .env.example 在專案根目錄建立 .env 並設定 API 金鑰")
 
-app = FastAPI()
-
-API_SECRET_KEY = "super_secret_cnc_key_2026"
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 def verify_api_key(api_key: str = Security(api_key_header)):
-    if api_key != API_SECRET_KEY:
+    if not api_key or not secrets.compare_digest(api_key.encode(), API_SECRET_KEY.encode()):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="拒絕存取：無效的 API 金鑰"
         )
     return api_key
 
-# ==========================================
-# 🔍 1. 模型路徑與載入設定 (雙專家 + 分類器)
-# ==========================================
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-MODELS_DIR = os.path.join(BASE_DIR, 'results')
-os.makedirs(MODELS_DIR, exist_ok=True)
+# 💡 所有 API 都必須帶金鑰，避免有人繞過前端登入直接呼叫
+app = FastAPI(dependencies=[Depends(verify_api_key)])
 
-MODEL_END_PATH = os.path.join(MODELS_DIR, 'best_model_End_Milling.pth')
-MODEL_PERI_PATH = os.path.join(MODELS_DIR, 'best_model_Peripheral_Milling.pth')
-CLASSIFIER_PATH = os.path.join(MODELS_DIR, 'best_classifier.pth')
+# ==========================================
+# 🤖 2. 載入傳統機器學習引擎
+# ==========================================
+RF_MODEL = None
+RF_MODEL_MTIME = None
+
+def get_rf_model():
+    """取得傳統 RF 模型；模型檔重新訓練或切換版本後會自動重新載入"""
+    global RF_MODEL, RF_MODEL_MTIME
+    rf_path = current_path("Traditional")
+    if not rf_path.exists():
+        return None
+    mtime = rf_path.stat().st_mtime
+    if RF_MODEL is None or mtime != RF_MODEL_MTIME:
+        RF_MODEL = joblib.load(rf_path)
+        RF_MODEL_MTIME = mtime
+    return RF_MODEL
+
+try:
+    if get_rf_model() is not None:
+        print("✅ 傳統 Random Forest 引擎載入成功")
+    else:
+        print("⚠ 找不到傳統模型，請先訓練")
+except Exception as e:
+    print(f"⚠ 找不到傳統模型或發生錯誤: {e}")
 
 # ==========================================
 # 🧠 2. 智慧動態記憶體管理 (動態加載/卸載)
@@ -110,6 +123,13 @@ class ClassifierModel(nn.Module):
     def forward(self, img):
         return self.resnet(img)
 
+def load_torch_model(role, model_path):
+    """依模型類型建立網路架構並載入權重"""
+    model = ClassifierModel() if role == "Classifier" else ResNetDualInputModel()
+    model.load_state_dict(torch.load(model_path, map_location='cpu'))
+    model.eval()
+    return model
+
 def load_models_on_demand():
     """需要預測時才掛載模型"""
     global expert_models, classifier_model, models_are_loaded
@@ -117,23 +137,12 @@ def load_models_on_demand():
         return
 
     print("⏳ 偵測到模型尚未載入，正在將大腦掛載至 GPU 記憶體...")
-    if os.path.exists(MODEL_END_PATH):
-        model = ResNetDualInputModel()
-        model.load_state_dict(torch.load(MODEL_END_PATH, map_location='cpu'))
-        model.eval()
-        expert_models["End_Milling"] = model
+    for role in expert_models:
+        if current_path(role).exists():
+            expert_models[role] = load_torch_model(role, current_path(role))
 
-    if os.path.exists(MODEL_PERI_PATH):
-        model = ResNetDualInputModel()
-        model.load_state_dict(torch.load(MODEL_PERI_PATH, map_location='cpu'))
-        model.eval()
-        expert_models["Peripheral_Milling"] = model
-
-    if os.path.exists(CLASSIFIER_PATH):
-        model = ClassifierModel()
-        model.load_state_dict(torch.load(CLASSIFIER_PATH, map_location='cpu'))
-        model.eval()
-        classifier_model = model
+    if current_path("Classifier").exists():
+        classifier_model = load_torch_model("Classifier", current_path("Classifier"))
 
     models_are_loaded = True
     print("✅ 模型掛載完成，系統已進入戰鬥狀態！")
@@ -175,6 +184,39 @@ transform = T.Compose([
     T.ToTensor(),
     T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
 ])
+
+# ==========================================
+# 🎨 Grad-CAM 熱力圖
+# ==========================================
+def compute_gradcam(model, img_tensor, params_tensor, base_img):
+    """回歸模型的 Grad-CAM：以預測的 Ra 對 ResNet 最後一層特徵圖取梯度，標出影響預測最大的區域"""
+    feature_maps = {}
+    handle = model.resnet.layer4.register_forward_hook(lambda module, inp, out: feature_maps.update(value=out))
+    try:
+        with torch.enable_grad():
+            output = model(img_tensor, params_tensor)
+            grads = torch.autograd.grad(output.sum(), feature_maps['value'])[0]
+    finally:
+        handle.remove()
+
+    weights = grads.mean(dim=(2, 3), keepdim=True)
+    cam = torch.relu((weights * feature_maps['value']).sum(dim=1)).squeeze(0).detach().cpu().numpy()
+    cam = cam - cam.min()
+    if cam.max() > 0:
+        cam = cam / cam.max()
+
+    # 疊在灰階原圖上，並縮小到最長邊 800px 以減少傳輸量
+    base = np.array(base_img.convert('RGB'))
+    scale = min(1.0, 800 / max(base.shape[:2]))
+    size = (max(1, round(base.shape[1] * scale)), max(1, round(base.shape[0] * scale)))
+    base = cv2.resize(base, size, interpolation=cv2.INTER_AREA)
+    cam = cv2.resize(cam, size)
+    colored = cv2.cvtColor(cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
+    overlay = (0.5 * base + 0.5 * colored).astype(np.uint8)
+
+    buf = io.BytesIO()
+    Image.fromarray(overlay).save(buf, format='JPEG', quality=90)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode('ascii')
 
 # ==========================================
 # 🚀 3. 預測核心 API
@@ -310,6 +352,14 @@ async def predict(
         }
     }
 
+    # 🎨 Grad-CAM：用整張灰階影像分析模型主要看哪些區域
+    if gradcam:
+        try:
+            img_tensor = transform(img_bw).unsqueeze(0).to(device)
+            result['heatmap'] = compute_gradcam(target_model, img_tensor, params_tensor[:1], img_bw)
+        except Exception as e:
+            result['heatmap_error'] = str(e)
+
     try:
         fn = getattr(file, 'filename', f'upload_{int(time.time())}')
         log_prediction(fn, final_ra)
@@ -320,7 +370,11 @@ async def predict(
 
 @app.post("/predict/traditional")
 async def predict_traditional(file: UploadFile = File(...)):
-    if not RF_MODEL:
+    try:
+        rf_model = get_rf_model()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"傳統 ML 引擎載入失敗：{e}"})
+    if rf_model is None:
         return JSONResponse(status_code=500, content={"error": "傳統 ML 引擎未啟動"})
 
     try:
@@ -337,7 +391,7 @@ async def predict_traditional(file: UploadFile = File(...)):
         features = np.array([[brightness_var, edge_density, laplacian_var]])
 
         # 進行預測
-        pred_ra = RF_MODEL.predict(features)[0]
+        pred_ra = rf_model.predict(features)[0]
 
         return {
             "engine": "Random_Forest",
@@ -367,6 +421,8 @@ def run_training_script(milling_type: str):
         # 💡 核心修改：判斷要呼叫哪一支訓練腳本
         if milling_type == "Classifier":
             script_train = os.path.join(BASE_DIR, "scripts", "train_classifier.py")
+        elif milling_type == "Traditional":
+            script_train = os.path.join(BASE_DIR, "scripts", "train_traditional_ml.py")
         else:
             script_train = os.path.join(BASE_DIR, "scripts", "train_model.py")
 
@@ -384,8 +440,8 @@ def run_training_script(milling_type: str):
 
             f.write(f"\n🚀 啟動【{milling_type}】神經網路訓練...\n".encode('utf-8'))
 
-            # 💡 核心修改：分類器不需要後面的參數，專家大腦才需要
-            if milling_type == "Classifier":
+            # 💡 核心修改：分類器與傳統模型不需要後面的參數，專家大腦才需要
+            if milling_type in ("Classifier", "Traditional"):
                 subprocess.Popen([python_exe, script_train], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
             else:
                 subprocess.Popen([python_exe, script_train, "--milling_type", milling_type], cwd=BASE_DIR, stdout=f, stderr=subprocess.STDOUT, env=custom_env)
@@ -394,8 +450,8 @@ def run_training_script(milling_type: str):
         print(f"❌ [背景任務] 訓練發生錯誤: {str(e)}")
 
 @app.post("/train")
-async def start_training(milling_type: str = Query(...), background_tasks: BackgroundTasks = BackgroundTasks(), user: str = Depends(verify_api_key)):
-    if milling_type not in ["End_Milling", "Peripheral_Milling", "Classifier"]:
+async def start_training(milling_type: str = Query(...), background_tasks: BackgroundTasks = BackgroundTasks()):
+    if milling_type not in ["End_Milling", "Peripheral_Milling", "Classifier", "Traditional"]:
         return JSONResponse({"error": "未知的訓練類型"}, status_code=400)
 
     background_tasks.add_task(run_training_script, milling_type)
@@ -413,23 +469,28 @@ def log_prediction(filename: str, ra: float):
     except Exception:
         pass
 
+def train_log_path(name: str):
+    """只允許讀取 train_logs 資料夾裡的 .log 檔，避免用 ..\\ 之類的路徑讀到其他檔案"""
+    if os.path.basename(name) != name or not name.endswith('.log'):
+        return None
+    return os.path.join(BASE_DIR, 'results', 'train_logs', name)
+
 @app.get('/train_logs')
-async def list_train_logs(user: str = Depends(verify_api_key)):
+async def list_train_logs():
     log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
     return {"logs": sorted(os.listdir(log_dir), reverse=True)} if os.path.exists(log_dir) else {"logs": []}
 
 @app.get('/train_logs/{name}')
-async def get_train_log(name: str, user: str = Depends(verify_api_key)):
-    path = os.path.join(BASE_DIR, 'results', 'train_logs', name)
-    if not os.path.exists(path): return JSONResponse({"error": "not found"}, status_code=404)
+async def get_train_log(name: str):
+    path = train_log_path(name)
+    if not path or not os.path.exists(path): return JSONResponse({"error": "not found"}, status_code=404)
     with open(path, 'r', encoding='utf-8', errors='ignore') as f: return {"log": f.read()}
 
 # 💡 補回來的折線圖讀取 API
 @app.get('/train_progress/{name}')
-async def train_progress(name: str, user: str = Depends(verify_api_key)):
-    log_dir = os.path.join(BASE_DIR, 'results', 'train_logs')
-    path = os.path.join(log_dir, name)
-    if not os.path.exists(path):
+async def train_progress(name: str):
+    path = train_log_path(name)
+    if not path or not os.path.exists(path):
         return JSONResponse({"error": "not found"}, status_code=404)
     entries = []
     try:
@@ -448,24 +509,57 @@ async def train_progress(name: str, user: str = Depends(verify_api_key)):
     return {"progress": entries}
 
 @app.get('/admin/stats')
-async def admin_stats(user: str = Depends(verify_api_key)):
+async def admin_stats():
     return {"cpu": psutil.cpu_percent(interval=0.5), "mem": psutil.virtual_memory()._asdict(), "gpu": {'available': torch.cuda.is_available()}}
+
+# ==========================================
+# 🔄 5. 模型版本管理 (熱切換 / Rollback)
+# ==========================================
+def describe_role(role):
+    current = current_path(role)
+    version = version_of(current) if current.exists() else None
+    return {
+        "file": MODEL_FILES[role],
+        "exists": version is not None,
+        "version": version,
+        "meta": read_meta(current) if version else None,
+        "archived": [
+            {
+                "file": name,
+                "is_current": version is not None and name == archived_name(role, version),
+                "meta": read_meta(ARCHIVE_DIR / name),
+            }
+            for name in list_archived(role)
+        ],
+    }
 
 @app.get('/models')
 async def list_models():
-    """獲取 results 資料夾下的所有模型檔案"""
-    if not os.path.exists(MODELS_DIR):
-        return {"models": []}
-
-    files = [f for f in os.listdir(MODELS_DIR) if f.endswith('.pth') or f.endswith('.joblib')]
-    return {"models": [{"file": f} for f in files]}
+    """列出每種模型的線上版本，以及 results/archive/ 裡可以切換的歷史版本"""
+    return {"roles": {role: describe_role(role) for role in MODEL_FILES}}
 
 @app.post('/admin/set_active_model')
-async def set_active_model(model_file: str = Query(...), user: str = Depends(verify_api_key)):
-    """(擴充預留) 熱切換線上模型的 API"""
-    target_path = os.path.join(MODELS_DIR, model_file)
-    if not os.path.exists(target_path):
+async def set_active_model(role: str = Query(...), model_file: str = Query(...)):
+    """把 results/archive/ 裡的某個版本換成線上版本"""
+    if role not in MODEL_FILES:
+        return JSONResponse(status_code=400, content={"error": "未知的模型類型"})
+    if model_file not in list_archived(role):
         return JSONResponse(status_code=404, content={"error": "找不到該模型檔案"})
+
+    # 先確認檔案能正常載入，避免把壞掉的檔案換上線
+    try:
+        if role == "Traditional":
+            if not hasattr(joblib.load(ARCHIVE_DIR / model_file), "predict"):
+                raise ValueError("不是可用的迴歸模型")
+        else:
+            load_torch_model(role, ARCHIVE_DIR / model_file)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"模型檔案無法載入：{e}"})
+
+    deploy_archived(role, model_file)
+    # 深度學習模型先卸載，下一次預測就會載入新版本；RF 模型會在下一次預測時自動重新載入
+    if role != "Traditional":
+        unload_models_to_free_vram()
     return {"msg": f"✅ 模型 {model_file} 已成功設為上線版本！"}
 
 if __name__ == '__main__':

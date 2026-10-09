@@ -1,6 +1,7 @@
 import hashlib
 import os
 import random
+import re
 import pandas as pd
 import sys
 from collections import Counter
@@ -13,10 +14,62 @@ from project_root import str_path
 VAL_RATIO = 0.2
 SPLIT_SEED = 42
 
+IMAGE_EXTS = ('.png', '.jpg', '.jpeg')
+
+# 測試照片（每刀一張）只用來檢測模型，永遠不放進訓練資料
+TEST_PHOTO_DIR = str_path('data', 'example')
+# 每張測試照片的原始檔名，用來認出同一次拍攝、但裁切過或另存的照片
+TEST_PHOTO_SOURCES = str_path('data', 'example_來源.csv')
+# 相機用拍攝時間命名照片，例如 20260630164127828.jpg
+SHOT_STAMP = re.compile(r'(?<!\d)\d{17}(?!\d)')
+
 
 def condition_sort_key(condition_id):
     # "7000-0.5" -> (7000.0, 0.5)，讓 5000-2 排在 5000-10 前面
     return tuple(float(x) for x in condition_id.split('-'))
+
+
+def md5_of(path):
+    with open(path, 'rb') as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+
+def exclude_test_photos(df):
+    """從訓練資料排除 data/example 的測試照片。
+
+    內容和測試照片完全相同，或檔名的拍攝時間和測試照片的原始檔相同（同一次拍攝、裁切過的版本），都會排除。
+    """
+    if not os.path.isdir(TEST_PHOTO_DIR):
+        return df
+    test_names = [f for f in os.listdir(TEST_PHOTO_DIR) if f.lower().endswith(IMAGE_EXTS)]
+
+    test_digests = {}
+    for name in test_names:
+        path = os.path.join(TEST_PHOTO_DIR, name)
+        test_digests.setdefault(os.path.getsize(path), set()).add(md5_of(path))
+
+    test_stamps = set()
+    if os.path.exists(TEST_PHOTO_SOURCES):
+        sources = pd.read_csv(TEST_PHOTO_SOURCES, encoding='utf-8-sig')
+        for name, source in zip(sources['測試照片'], sources['原始檔名']):
+            stamp = SHOT_STAMP.search(str(source))
+            if name in test_names and stamp:
+                test_stamps.add(stamp.group())
+
+    def is_test_photo(path):
+        stamp = SHOT_STAMP.search(os.path.basename(path))
+        if stamp and stamp.group() in test_stamps:
+            return True
+        same_size = test_digests.get(os.path.getsize(path))
+        return bool(same_size) and md5_of(path) in same_size
+
+    leaked = df['image_path'].map(is_test_photo)
+    print(f"🔒 測試照片（data/example）共 {len(test_names)} 張，不會放進訓練資料。")
+    if leaked.any():
+        print(f"⚠ 有 {leaked.sum()} 張照片和測試照片相同或是同一次拍攝，已從訓練資料排除：")
+        for path in df.loc[leaked, 'image_path']:
+            print(f"   {os.path.relpath(path, str_path('data'))}")
+    return df[~leaked]
 
 
 def find_duplicate_photos(paths):
@@ -34,8 +87,7 @@ def find_duplicate_photos(paths):
             continue
         by_digest = {}
         for p in same_size:
-            with open(p, 'rb') as f:
-                by_digest.setdefault(hashlib.md5(f.read()).hexdigest(), []).append(p)
+            by_digest.setdefault(md5_of(p), []).append(p)
         for copies in by_digest.values():
             for p in copies[1:]:
                 first_copy[p] = copies[0]
@@ -219,7 +271,6 @@ def generate_manifest():
     }
 
     all_data_rows = []
-    valid_exts = ('.png', '.jpg', '.jpeg')
 
     if not os.path.exists(DATASET_DIR):
         print(f"❌ 找不到資料夾：{DATASET_DIR}，請確認 Dataset_Cleaned 是否在正確位置。")
@@ -228,7 +279,7 @@ def generate_manifest():
     # 自動掃描 Dataset_Cleaned 底下的所有東西
     for root, dirs, files in os.walk(DATASET_DIR):
         for file in files:
-            if file.lower().endswith(valid_exts):
+            if file.lower().endswith(IMAGE_EXTS):
                 # 取得絕對路徑給 PyTorch Dataset 讀取
                 abs_path = os.path.abspath(os.path.join(root, file))
                 rel_path = os.path.relpath(abs_path, start=DATASET_DIR)
@@ -265,7 +316,7 @@ def generate_manifest():
                                 "ra_target": float(ra_val)
                             })
 
-    dataset_df = assign_split(pd.DataFrame(all_data_rows))
+    dataset_df = assign_split(exclude_test_photos(pd.DataFrame(all_data_rows)))
 
     # 確保輸出的 data 目錄存在
     os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)

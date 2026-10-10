@@ -38,20 +38,20 @@ def load_features(df):
 def main():
     print("🚀 開始萃取傳統特徵並訓練 Random Forest 模型...")
     df = pd.read_csv(str_path('data', 'final_training_manifest.csv'))
-    if 'split' not in df.columns:
-        raise ValueError("❌ CSV 缺少 split 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
+    if 'split' not in df.columns or 'md5' not in df.columns:
+        raise ValueError("❌ CSV 缺少 split 或 md5 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
     df = df[df['machining_type'] != 'Other'].dropna()
 
-    # 依刀切分 (由 dataset_prepare.py 決定)，和深度學習模型保留相同的驗證刀，比較才公平
-    X_train, y_train, _ = load_features(df[df['split'] == 'train'])
+    # 依照片切分 (由 dataset_prepare.py 決定)，和深度學習模型使用相同的訓練與驗證照片，比較才公平
+    X_train, y_train, train_used = load_features(df[df['split'] == 'train'])
     X_val, y_val, val_df = load_features(df[df['split'] == 'val'])
-    print(f"🧪 訓練 {len(X_train)} 張 / 驗證 {len(X_val)} 張（驗證集的刀訓練時不會看到）")
+    print(f"🧪 訓練 {len(X_train)} 張 / 驗證 {len(X_val)} 張（每一刀各抽一部分照片驗證）")
 
     # 訓練隨機森林回歸模型
     rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
     rf_model.fit(X_train, y_train)
 
-    # 用訓練時沒看過的刀評估
+    # 用訓練時沒用過的照片評估
     abs_err = np.abs(rf_model.predict(X_val) - y_val)
     val_mae = float(abs_err.mean())
     val_mape = float((abs_err / y_val).mean() * 100)
@@ -73,7 +73,8 @@ def main():
         'val_mape': val_mape,
         'train_images': len(X_train),
         'val_images': len(X_val),
-        'val_conditions': sorted({f"{t}/{c}" for t, c in zip(val_df['machining_type'], val_df['condition_id'])}),
+        # 訓練用過的照片（內容雜湊），批量驗證頁靠它判斷上傳的照片是否訓練過；RF 不用驗證集挑選模型
+        'train_photos': sorted(train_used['md5']),
     })
     print(f"✅ 傳統機器學習模型訓練完成！已儲存至：{save_path}")
 

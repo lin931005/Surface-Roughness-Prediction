@@ -74,19 +74,16 @@ class SurfaceDataset(Dataset):
             # 驗證：每張照片均勻取 3x3 個方塊，評估時取平均，和線上推論的做法一致
             img_tensor = torch.stack([to_input(img_pil.crop(box)) for box in grid_boxes(img_pil)])
 
-        speed = float(row['speed']) / 10000.0
-        cond = 0.0 # 💡 修正：廢棄字串編號轉換，統一設為 0.0 配合推論端
-        params = np.array([speed, cond], dtype=np.float32)
         ra_target = np.array([row['ra_target']], dtype=np.float32)
 
-        return img_tensor, torch.tensor(params), torch.tensor(ra_target)
+        return img_tensor, torch.tensor(ra_target)
 
 # ==========================================
-# 2. 雙輸入 AI 模型 (ResNet-50 全局微調)
+# 2. Ra 回歸模型：只看刀痕影像，不輸入轉速等加工參數 (ResNet-50 全局微調)
 # ==========================================
-class ResNetDualInputModel(nn.Module):
+class ResNetRegressor(nn.Module):
     def __init__(self):
-        super(ResNetDualInputModel, self).__init__()
+        super(ResNetRegressor, self).__init__()
         self.resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
 
         num_ftrs = self.resnet.fc.in_features
@@ -95,22 +92,14 @@ class ResNetDualInputModel(nn.Module):
             nn.ReLU(),
         )
 
-        self.dnn = nn.Sequential(
-            nn.Linear(2, 16),
-            nn.ReLU(),
-        )
-
         self.fc = nn.Sequential(
-            nn.Linear(64 + 16, 32),
+            nn.Linear(64, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
         )
 
-    def forward(self, img, params):
-        img_features = self.resnet(img)
-        param_features = self.dnn(params)
-        combined = torch.cat((img_features, param_features), dim=1)
-        return self.fc(combined)
+    def forward(self, img):
+        return self.fc(self.resnet(img))
 
 # ==========================================
 # 3. 工具函式與主程式
@@ -128,13 +117,12 @@ def evaluate(model, dataloader, criterion, device):
     total_loss = 0.0
     total_abs_err, total_count = 0.0, 0
     with torch.no_grad():
-        for imgs, params, targets in dataloader:
+        for imgs, targets in dataloader:
             imgs = imgs.to(device)
-            params = params.to(device)
             targets = targets.to(device)
             n_imgs, n_patches = imgs.shape[:2]
             with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
-                preds = model(imgs.flatten(0, 1), params.repeat_interleave(n_patches, dim=0))
+                preds = model(imgs.flatten(0, 1))
                 preds = preds.view(n_imgs, n_patches).mean(dim=1, keepdim=True)
                 loss = criterion(preds, targets)
             total_loss += loss.item()
@@ -164,8 +152,8 @@ def main():
         raise FileNotFoundError(f"找不到 CSV 檔案：{CSV_PATH}")
 
     data_df = pd.read_csv(CSV_PATH)
-    if 'split' not in data_df.columns:
-        raise ValueError("❌ CSV 缺少 split 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
+    if 'split' not in data_df.columns or 'md5' not in data_df.columns:
+        raise ValueError("❌ CSV 缺少 split 或 md5 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
 
     # 💡 核心過濾：只挑選符合當前 milling_type 的資料來訓練！
     data_df = data_df[data_df['machining_type'] == args.milling_type].copy()
@@ -175,13 +163,12 @@ def main():
 
     print(f"📂 成功載入 {len(data_df)} 筆 {args.milling_type} 影像資料！")
 
-    # 💡 依刀切分 (由 dataset_prepare.py 決定)：驗證集的刀訓練時完全看不到，驗證成績才不會偏樂觀
+    # 💡 依照片切分 (由 dataset_prepare.py 決定)：每一刀各抽一部分照片驗證，用來挑選最好的訓練回合；測試照片不在任何一邊
     train_df = data_df[data_df['split'] == 'train'].reset_index(drop=True)
     val_df = data_df[data_df['split'] == 'val'].reset_index(drop=True)
     if train_df.empty or val_df.empty:
         raise ValueError("❌ 訓練集或驗證集是空的，請檢查 dataset_prepare.py 的切分結果")
-    val_conditions = sorted(val_df['condition_id'].unique())
-    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張，驗證用的刀：{', '.join(val_conditions)}")
+    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張（每一刀各抽一部分照片驗證）")
 
     archived = archive_current(args.milling_type)
     if archived:
@@ -195,7 +182,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=max(1, BATCH_SIZE // EVAL_GRID ** 2), shuffle=False, num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
     print(f"🔍 前處理：從原始照片切 {PATCH_SIZE}x{PATCH_SIZE} 方塊後縮成 224x224，驗證時每張照片取 {EVAL_GRID}x{EVAL_GRID} 個方塊平均")
 
-    model = ResNetDualInputModel().to(device)
+    model = ResNetRegressor().to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=LR)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
@@ -212,12 +199,12 @@ def main():
         model.train()
         train_loss = 0.0
 
-        for batch_imgs, batch_params, batch_targets in train_loader:
-            batch_imgs, batch_params, batch_targets = batch_imgs.to(device), batch_params.to(device), batch_targets.to(device)
+        for batch_imgs, batch_targets in train_loader:
+            batch_imgs, batch_targets = batch_imgs.to(device), batch_targets.to(device)
 
             optimizer.zero_grad()
             with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
-                predictions = model(batch_imgs, batch_params)
+                predictions = model(batch_imgs)
                 loss = criterion(predictions, batch_targets)
 
             scaler.scale(loss).backward()
@@ -240,7 +227,7 @@ def main():
             best_val_loss = avg_val_loss
             epochs_without_improve = 0
             torch.save(model.state_dict(), BEST_MODEL_PATH)
-            # 記錄這個版本的驗證成績與保留的驗證刀，批量驗證頁靠它判斷哪些影像是模型沒看過的
+            # 記錄這個版本的驗證成績，以及訓練、驗證用過的照片（內容雜湊），批量驗證頁靠它判斷上傳的照片是否訓練過
             write_meta(args.milling_type, {
                 'trained_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'epoch': epoch,
@@ -248,8 +235,10 @@ def main():
                 'val_mae': val_mae,
                 'train_images': len(train_df),
                 'val_images': len(val_df),
-                'val_conditions': [f"{args.milling_type}/{c}" for c in val_conditions],
+                'train_photos': sorted(set(train_df['md5']) | set(val_df['md5'])),
                 'preprocess': PREPROCESS_VERSION,
+                # 只看影像、不需要轉速；後端靠這個欄位認出舊版需要轉速的模型
+                'inputs': 'image',
             })
             print(f"  👉 已儲存最佳 {args.milling_type} 模型！")
         else:

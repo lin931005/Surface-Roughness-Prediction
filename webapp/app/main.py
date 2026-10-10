@@ -94,28 +94,26 @@ except Exception as e:
 # 🧠 2. 智慧動態記憶體管理 (動態加載/卸載)
 # ==========================================
 expert_models = {"End_Milling": None, "Peripheral_Milling": None}
+MILLING_LABELS = {"End_Milling": "立銑", "Peripheral_Milling": "直銑"}
 classifier_model = None
-model_preprocess = {}  # 各模型訓練時使用的前處理版本（來自 meta.json），用來提醒舊模型需要重新訓練
+model_meta = {}  # 線上各模型的訓練紀錄（meta.json），用來提醒舊模型需要重新訓練
 
 # 全域狀態與計時器
 models_are_loaded = False
 last_active_time = time.time()
 IDLE_TIMEOUT_SECONDS = 600  # 閒置 10 分鐘 (600 秒) 後自動卸載
 
-class ResNetDualInputModel(nn.Module):
+class ResNetRegressor(nn.Module):
+    """Ra 回歸模型：只看刀痕影像，不輸入轉速等加工參數"""
     def __init__(self):
-        super(ResNetDualInputModel, self).__init__()
+        super(ResNetRegressor, self).__init__()
         self.resnet = models.resnet50(weights=None)
         num_ftrs = self.resnet.fc.in_features
         self.resnet.fc = nn.Sequential(nn.Linear(num_ftrs, 64), nn.ReLU())
-        self.dnn = nn.Sequential(nn.Linear(2, 16), nn.ReLU())
-        self.fc = nn.Sequential(nn.Linear(64 + 16, 32), nn.ReLU(), nn.Linear(32, 1))
+        self.fc = nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 1))
 
-    def forward(self, img, params):
-        img_features = self.resnet(img)
-        param_features = self.dnn(params)
-        combined = torch.cat((img_features, param_features), dim=1)
-        return self.fc(combined)
+    def forward(self, img):
+        return self.fc(self.resnet(img))
 
 class ClassifierModel(nn.Module):
     def __init__(self):
@@ -130,10 +128,22 @@ class ClassifierModel(nn.Module):
 
 def load_torch_model(role, model_path):
     """依模型類型建立網路架構並載入權重"""
-    model = ClassifierModel() if role == "Classifier" else ResNetDualInputModel()
+    model = ClassifierModel() if role == "Classifier" else ResNetRegressor()
     model.load_state_dict(torch.load(model_path, map_location='cpu'))
     model.eval()
     return model
+
+def is_image_only(meta):
+    """Ra 模型是否只看影像；舊版的 Ra 模型還要輸入轉速，網路架構不同，無法在目前的系統使用"""
+    return (meta or {}).get("inputs") == "image"
+
+def up_to_date(role, meta):
+    """模型是否符合目前的系統：深度學習模型要用目前版本的前處理訓練，Ra 模型還要是只看影像的版本；傳統 RF 不受影響"""
+    if role == "Traditional":
+        return True
+    if (meta or {}).get("preprocess") != PREPROCESS_VERSION:
+        return False
+    return role == "Classifier" or is_image_only(meta)
 
 def load_models_on_demand():
     """需要預測時才掛載模型"""
@@ -142,15 +152,16 @@ def load_models_on_demand():
         return
 
     print("⏳ 偵測到模型尚未載入，正在將大腦掛載至 GPU 記憶體...")
+    for role in ("End_Milling", "Peripheral_Milling", "Classifier"):
+        model_meta[role] = read_meta(current_path(role))
+
     for role in expert_models:
-        if current_path(role).exists():
+        # 需要轉速的舊版 Ra 模型不載入，預測時會提示重新訓練
+        if current_path(role).exists() and is_image_only(model_meta[role]):
             expert_models[role] = load_torch_model(role, current_path(role))
 
     if current_path("Classifier").exists():
         classifier_model = load_torch_model("Classifier", current_path("Classifier"))
-
-    for role in ("End_Milling", "Peripheral_Milling", "Classifier"):
-        model_preprocess[role] = (read_meta(current_path(role)) or {}).get("preprocess")
 
     models_are_loaded = True
     print("✅ 模型掛載完成，系統已進入戰鬥狀態！")
@@ -190,7 +201,7 @@ async def startup_event():
 # ==========================================
 # 🎨 Grad-CAM 熱力圖
 # ==========================================
-def compute_gradcam(model, img_bw, params_row):
+def compute_gradcam(model, img_bw):
     """回歸模型的 Grad-CAM：把影像切成蓋滿整張的方塊（與預測相同的放大倍率），
     各方塊以預測的 Ra 對 ResNet 最後一層特徵圖取梯度，再拼回整張圖，標出影響預測最大的區域"""
     device = next(model.parameters()).device
@@ -200,7 +211,7 @@ def compute_gradcam(model, img_bw, params_row):
     handle = model.resnet.layer4.register_forward_hook(lambda module, inp, out: feature_maps.update(value=out))
     try:
         with torch.enable_grad():
-            output = model(batch, params_row.expand(len(boxes), -1))
+            output = model(batch)
             grads = torch.autograd.grad(output.sum(), feature_maps['value'])[0]
     finally:
         handle.remove()
@@ -237,9 +248,9 @@ def compute_gradcam(model, img_bw, params_row):
 async def predict(
     file: UploadFile = File(...),
     gradcam: bool = Query(False),
-    speed: float = Query(None),
     milling_type: str = Query("Auto")
 ):
+    """只看上傳的刀痕影像預測 Ra，不使用轉速等加工參數"""
     global last_active_time
     last_active_time = time.time()  # 💡 有人呼叫預測，重置 10 分鐘計時器！
 
@@ -291,15 +302,11 @@ async def predict(
 
     target_model = expert_models.get(final_milling_type)
     if target_model is None:
+        if current_path(final_milling_type).exists() and not is_image_only(model_meta.get(final_milling_type)):
+            return JSONResponse({"error": f"目前上線的{MILLING_LABELS[final_milling_type]} Ra 模型是需要輸入轉速的舊版本，請到「系統管理與模型控制台」重新訓練。"}, status_code=500)
         return JSONResponse({"error": f"尚未載入 {final_milling_type} 的模型，請先訓練！"}, status_code=500)
 
     target_model.to(device)
-
-    used_default = False
-    if speed is None:
-        speed = 5000.0
-        used_default = True
-    dummy_condition = 0.0
 
     num_patches = 32
     # 💡 從原始解析度隨機切 32 個固定大小的方塊（放大倍率與訓練時相同）；
@@ -309,10 +316,9 @@ async def predict(
     patch_coords = [{"top": top, "left": left, "bottom": bottom, "right": right} for left, top, right, bottom in boxes]
 
     batch_tensors = torch.stack([to_input(img_bw.crop(box)) for box in boxes]).to(device)
-    params_tensor = torch.tensor([[speed / 10000.0, dummy_condition / 10.0]] * num_patches, dtype=torch.float32).to(device)
 
     with torch.no_grad():
-        preds = target_model(batch_tensors, params_tensor).cpu().numpy().flatten()
+        preds = target_model(batch_tensors).cpu().numpy().flatten()
 
     # 🌟 終極防禦：全面信任三元分類大腦的「Other 攔截」與「85% 自信度門檻」
     is_anomaly = bool(ai_is_confused)
@@ -339,19 +345,18 @@ async def predict(
             status = "保留 (有效計算區間)"
         detailed_patches.append({"id": i + 1, "ra": float(val), "status": status, "coords": coords})
 
-    # 💡 這次用到的模型若是用舊版前處理訓練的，提醒使用者重新訓練
+    # 💡 這次用到的模型若是舊版本（例如用舊版前處理訓練的），提醒使用者重新訓練
     used_roles = [final_milling_type] + (["Classifier"] if milling_type == "Auto" and classifier_model is not None else [])
-    preprocess_mismatch = any(model_preprocess.get(role) != PREPROCESS_VERSION for role in used_roles)
+    outdated_model = any(not up_to_date(role, model_meta.get(role)) for role in used_roles)
 
     result = {
         "ra": final_ra,
-        "used_default_params": used_default,
         "is_anomaly": is_anomaly,
         "preds_std": color_std_score,
         "preds_edge": edge_score,
         "ai_confidence": ai_confidence,  # 💡 修改點 2：把 AI 的自信度數據打包傳給網頁
         "detected_milling": final_milling_type,
-        "preprocess_mismatch": preprocess_mismatch,
+        "outdated_model": outdated_model,
         "xai_details": {
             "num_patches": num_patches,
             "trim_count": trim_count,
@@ -363,7 +368,7 @@ async def predict(
     # 🎨 Grad-CAM：逐塊分析後拼回整張圖，標出模型主要看哪些區域
     if gradcam:
         try:
-            result['heatmap'] = compute_gradcam(target_model, img_bw, params_tensor[:1])
+            result['heatmap'] = compute_gradcam(target_model, img_bw)
         except Exception as e:
             result['heatmap_error'] = str(e)
 
@@ -534,9 +539,9 @@ async def admin_stats():
 # ==========================================
 # 🔄 5. 模型版本管理 (熱切換 / Rollback)
 # ==========================================
-def preprocess_ok(role, meta):
-    """傳統 RF 不受影像前處理影響；深度學習模型必須是用目前版本的前處理訓練的"""
-    return role == "Traditional" or (meta or {}).get("preprocess") == PREPROCESS_VERSION
+def summarize_meta(meta):
+    """訓練用過的照片清單很長，模型清單只需要其他欄位"""
+    return {k: v for k, v in meta.items() if k != "train_photos"} if meta else meta
 
 def describe_role(role):
     current = current_path(role)
@@ -548,15 +553,15 @@ def describe_role(role):
         archived.append({
             "file": name,
             "is_current": version is not None and name == archived_name(role, version),
-            "meta": archived_meta,
-            "preprocess_ok": preprocess_ok(role, archived_meta),
+            "meta": summarize_meta(archived_meta),
+            "up_to_date": up_to_date(role, archived_meta),
         })
     return {
         "file": MODEL_FILES[role],
         "exists": version is not None,
         "version": version,
-        "meta": meta,
-        "preprocess_ok": preprocess_ok(role, meta),
+        "meta": summarize_meta(meta),
+        "up_to_date": up_to_date(role, meta),
         "archived": archived,
     }
 
@@ -565,6 +570,16 @@ async def list_models():
     """列出每種模型的線上版本，以及 results/archive/ 裡可以切換的歷史版本"""
     return {"roles": {role: describe_role(role) for role in MODEL_FILES}}
 
+@app.get('/models/train_photos')
+async def list_train_photos():
+    """線上各模型訓練時用過的照片（內容的 MD5），批量驗證頁用來判斷上傳的照片是否訓練過；沒有記錄的舊模型不列出"""
+    photos = {}
+    for role in MODEL_FILES:
+        meta = read_meta(current_path(role)) if current_path(role).exists() else None
+        if meta and "train_photos" in meta:
+            photos[role] = meta["train_photos"]
+    return photos
+
 @app.post('/admin/set_active_model')
 async def set_active_model(role: str = Query(...), model_file: str = Query(...)):
     """把 results/archive/ 裡的某個版本換成線上版本"""
@@ -572,6 +587,8 @@ async def set_active_model(role: str = Query(...), model_file: str = Query(...))
         return JSONResponse(status_code=400, content={"error": "未知的模型類型"})
     if model_file not in list_archived(role):
         return JSONResponse(status_code=404, content={"error": "找不到該模型檔案"})
+    if role in expert_models and not is_image_only(read_meta(ARCHIVE_DIR / model_file)):
+        return JSONResponse(status_code=400, content={"error": "這個版本是需要輸入轉速的舊模型，目前的系統只用影像預測，無法切換到這個版本。"})
 
     # 先確認檔案能正常載入，避免把壞掉的檔案換上線
     try:

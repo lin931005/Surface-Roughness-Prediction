@@ -9,6 +9,7 @@ from collections import Counter
 # 確保能讀取到上一層的 project_root
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from project_root import str_path
+from photo_overlap import overlap_ratio, thumbnail
 
 # 驗證集比例與抽樣種子：同一份資料每次都會切出相同的驗證集
 VAL_RATIO = 0.2
@@ -22,11 +23,9 @@ TEST_PHOTO_DIR = str_path('data', 'example')
 TEST_PHOTO_SOURCES = str_path('data', 'example_來源.csv')
 # 相機用拍攝時間命名照片，例如 20260630164127828.jpg
 SHOT_STAMP = re.compile(r'(?<!\d)\d{17}(?!\d)')
-
-
-def condition_sort_key(condition_id):
-    # "7000-0.5" -> (7000.0, 0.5)，讓 5000-2 排在 5000-10 前面
-    return tuple(float(x) for x in condition_id.split('-'))
+# 測試照片的檔名格式，例如「直銑_7000-0.5_2.3746.jpg」，用來找出同一刀的照片
+TEST_PHOTO_NAME = re.compile(r'(立銑|直銑)_(\d{4,5}-\d+(?:\.\d+)?)_')
+TEST_PHOTO_TYPES = {'立銑': 'End_Milling', '直銑': 'Peripheral_Milling'}
 
 
 def md5_of(path):
@@ -34,14 +33,22 @@ def md5_of(path):
         return hashlib.md5(f.read()).hexdigest()
 
 
-def exclude_test_photos(df):
-    """從訓練資料排除 data/example 的測試照片。
-
-    內容和測試照片完全相同，或檔名的拍攝時間和測試照片的原始檔相同（同一次拍攝、裁切過的版本），都會排除。
-    """
+def list_test_photos():
     if not os.path.isdir(TEST_PHOTO_DIR):
+        return []
+    return [f for f in os.listdir(TEST_PHOTO_DIR) if f.lower().endswith(IMAGE_EXTS)]
+
+
+def exclude_test_photos(df):
+    """從訓練資料排除 data/example 的測試照片，以及和測試照片拍到同一個位置的照片：
+
+    - 內容和測試照片完全相同
+    - 檔名的拍攝時間和測試照片的原始檔相同（同一次拍攝、裁切過的版本）
+    - 同一刀裡和測試照片畫面重疊的照片（連續拍攝時拍到同一塊表面）
+    """
+    test_names = list_test_photos()
+    if not test_names:
         return df
-    test_names = [f for f in os.listdir(TEST_PHOTO_DIR) if f.lower().endswith(IMAGE_EXTS)]
 
     test_digests = {}
     for name in test_names:
@@ -63,117 +70,70 @@ def exclude_test_photos(df):
         same_size = test_digests.get(os.path.getsize(path))
         return bool(same_size) and md5_of(path) in same_size
 
-    leaked = df['image_path'].map(is_test_photo)
-    print(f"🔒 測試照片（data/example）共 {len(test_names)} 張，不會放進訓練資料。")
-    if leaked.any():
-        print(f"⚠ 有 {leaked.sum()} 張照片和測試照片相同或是同一次拍攝，已從訓練資料排除：")
-        for path in df.loc[leaked, 'image_path']:
-            print(f"   {os.path.relpath(path, str_path('data'))}")
-    return df[~leaked]
+    same_photo = df['image_path'].map(is_test_photo)
 
-
-def find_duplicate_photos(paths):
-    """找出內容完全相同的照片，回傳 {重複的照片: 第一次出現的照片}。
-
-    先比對檔案大小，大小相同才計算雜湊，不必把整個資料集讀過一遍。
-    """
-    by_size = {}
-    for p in paths:
-        by_size.setdefault(os.path.getsize(p), []).append(p)
-
-    first_copy = {}
-    for same_size in by_size.values():
-        if len(same_size) < 2:
+    # 同一刀的照片才可能拍到同一塊表面，只和同一刀的照片比對
+    same_spot = pd.Series(False, index=df.index)
+    for name in test_names:
+        m = TEST_PHOTO_NAME.match(name)
+        if not m:
+            print(f"⚠ 無法從檔名判斷測試照片 {name} 屬於哪一刀，沒辦法檢查同一刀裡拍到同一位置的照片，請改用「直銑_7000-3_1.565.jpg」的格式命名。")
             continue
-        by_digest = {}
-        for p in same_size:
-            by_digest.setdefault(md5_of(p), []).append(p)
-        for copies in by_digest.values():
-            for p in copies[1:]:
-                first_copy[p] = copies[0]
-    return first_copy
+        same_cut = df[~same_photo & (df['machining_type'] == TEST_PHOTO_TYPES[m.group(1)]) & (df['condition_id'] == m.group(2))]
+        test_thumb = thumbnail(os.path.join(TEST_PHOTO_DIR, name))
+        for idx, path in same_cut['image_path'].items():
+            if not same_spot[idx] and overlap_ratio(test_thumb, thumbnail(path)) > 0:
+                same_spot[idx] = True
+
+    print(f"🔒 測試照片（data/example）共 {len(test_names)} 張，不會放進訓練資料。")
+    if same_photo.any():
+        print(f"⚠ 有 {same_photo.sum()} 張照片和測試照片相同或是同一次拍攝，已從訓練資料排除：")
+        for path in df.loc[same_photo, 'image_path']:
+            print(f"   {os.path.relpath(path, str_path('data'))}")
+    if same_spot.any():
+        print(f"🔍 另有 {same_spot.sum()} 張照片和測試照片拍到同一個位置（畫面重疊），也從訓練資料排除，測試照片拍到的位置訓練時都看不到。")
+    return df[~(same_photo | same_spot)]
 
 
 def assign_split(df):
-    """依刀切分訓練集 (train) 與驗證集 (val)，驗證集的刀在訓練時完全看不到。
+    """依照片切分訓練集 (train) 與驗證集 (val)：每一刀各抽約 VAL_RATIO 的照片當驗證集，用來挑選最好的訓練回合。
 
-    下列照片會分在同一組，整組一起進訓練集或驗證集：
-    - 同一個條件資料夾的照片（同一刀）
-    - Ra 實測值相同的條件（例如 5000-7 與 5000-7.5）
-    - 內容完全相同的照片（同一張照片被放進不同資料夾）
-    分組後依「銑法 + 轉速」分層，每層抽 VAL_RATIO 的組別當驗證集；Other 沒有刀之分，逐張抽樣。
+    每一刀的其他照片都拿去訓練。內容完全相同的照片（同一張照片被放進不同資料夾）一定分在同一邊；
+    Other 沒有刀之分，整個類別一起抽樣。測試照片在這之前就已經排除，不在任何一邊。
     """
     df = df.reset_index(drop=True)
-    labels = [
-        f"{row.machining_type}/{row.condition_id}" if row.machining_type != 'Other'
-        else f"Other/{os.path.basename(row.image_path)}"
-        for row in df.itertuples()
-    ]
-
-    # 用 union-find 把有關聯的照片併成同一組
-    parent = list(range(len(df)))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    first_seen = {}
-
-    def link(key, i):
-        if key in first_seen:
-            parent[find(i)] = find(first_seen[key])
-        else:
-            first_seen[key] = i
-
-    duplicates = find_duplicate_photos(df['image_path'].tolist())
-    for i, row in enumerate(df.itertuples()):
-        link(('photo', duplicates.get(row.image_path, row.image_path)), i)
-        if row.machining_type != 'Other':
-            link(('condition', labels[i]), i)
-            link(('ra', row.machining_type, row.ra_target), i)
 
     # 同一張照片出現在 Ra 不同的條件裡，代表照片可能放錯資料夾，提醒使用者檢查
-    row_of = {p: i for i, p in enumerate(df['image_path'])}
     conflicts = Counter()
-    for dup, original in duplicates.items():
-        a, b = row_of[dup], row_of[original]
-        if df.at[a, 'ra_target'] != df.at[b, 'ra_target']:
-            conflicts[tuple(sorted((labels[a], labels[b])))] += 1
-    for (a, b), n in sorted(conflicts.items()):
-        print(f"⚠ 有 {n} 張照片同時出現在 {a} 和 {b}，但兩邊的 Ra 標籤不同，請確認照片是否放錯資料夾。")
-
-    groups = {}
-    for i in range(len(df)):
-        groups.setdefault(find(i), []).append(i)
+    groups = []
+    for _, copies in df.groupby('md5'):
+        members = sorted(copies.index, key=lambda i: df.at[i, 'image_path'])
+        groups.append(members)
+        if copies['ra_target'].nunique() > 1:
+            conflicts[tuple(sorted({f"{t}/{c}" for t, c in zip(copies['machining_type'], copies['condition_id'])}))] += 1
+    for labels, n in sorted(conflicts.items()):
+        print(f"⚠ 有 {n} 張照片同時出現在 {'、'.join(labels)}，但 Ra 標籤不同，請確認照片是否放錯資料夾。")
 
     strata = {}
-    for members in groups.values():
-        first = min(members, key=lambda i: labels[i])
-        merged = sorted({labels[i] for i in members if df.at[i, 'machining_type'] != 'Other'})
-        if len(merged) > 1:
-            print(f"🔗 這些條件被分在同一組（照片重複或 Ra 相同）：{'、'.join(merged)}")
-        stratum = (df.at[first, 'machining_type'], df.at[first, 'speed'])
-        strata.setdefault(stratum, []).append((labels[first], members))
+    for members in groups:
+        first = members[0]
+        stratum = (df.at[first, 'machining_type'], df.at[first, 'condition_id'])
+        strata.setdefault(stratum, []).append((df.at[first, 'image_path'], members))
 
     df['split'] = 'train'
     for stratum, stratum_groups in sorted(strata.items()):
         stratum_groups.sort(key=lambda g: g[0])
         random.Random(f"{SPLIT_SEED}-{stratum[0]}-{stratum[1]}").shuffle(stratum_groups)
-        # 只有一組時全部留給訓練，否則該轉速的資料模型完全學不到
+        # 只有一張照片時留給訓練
         n_val = max(1, round(len(stratum_groups) * VAL_RATIO)) if len(stratum_groups) >= 2 else 0
         for _, members in stratum_groups[:n_val]:
             df.loc[members, 'split'] = 'val'
 
     val_df = df[df['split'] == 'val']
-    print(f"🧪 驗證集共 {len(val_df)} 張（{len(val_df) / len(df):.0%}），這些刀在訓練時不會出現：")
+    print(f"🧪 驗證集共 {len(val_df)} 張（{len(val_df) / len(df):.0%}），每一刀各抽約 {VAL_RATIO:.0%} 的照片，用來挑選最好的訓練回合：")
     for machining_type, sub in val_df.groupby('machining_type'):
-        if machining_type == 'Other':
-            print(f"   Other：{len(sub)} 張")
-        else:
-            conditions = sorted(sub['condition_id'].unique(), key=condition_sort_key)
-            print(f"   {machining_type}：{'、'.join(conditions)}（{len(sub)} 張）")
+        cuts = "" if machining_type == 'Other' else f"，來自 {sub['condition_id'].nunique()} 刀"
+        print(f"   {machining_type}：{len(sub)} 張{cuts}")
     return df
 
 
@@ -316,7 +276,9 @@ def generate_manifest():
                                 "ra_target": float(ra_val)
                             })
 
-    dataset_df = assign_split(exclude_test_photos(pd.DataFrame(all_data_rows)))
+    dataset_df = exclude_test_photos(pd.DataFrame(all_data_rows))
+    # 記錄每張照片的內容雜湊：訓練時會存進模型紀錄，批量驗證時用來判斷上傳的照片是否訓練過
+    dataset_df = assign_split(dataset_df.assign(md5=dataset_df['image_path'].map(md5_of)))
 
     # 確保輸出的 data 目錄存在
     os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)

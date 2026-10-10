@@ -128,17 +128,15 @@ def main():
     df = pd.read_csv(CSV_PATH)
     if df.empty or 'machining_type' not in df.columns:
         raise ValueError("❌ CSV 格式錯誤或無資料")
-    if 'split' not in df.columns:
-        raise ValueError("❌ CSV 缺少 split 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
+    if 'split' not in df.columns or 'md5' not in df.columns:
+        raise ValueError("❌ CSV 缺少 split 或 md5 欄位，請先執行 scripts/dataset_prepare.py 重新產生清單")
 
-    # 依刀切分 (由 dataset_prepare.py 決定)：驗證集的刀訓練時完全看不到
+    # 依照片切分 (由 dataset_prepare.py 決定)：每一刀各抽一部分照片驗證；測試照片不在任何一邊
     train_df = df[df['split'] == 'train'].reset_index(drop=True)
     val_df = df[df['split'] == 'val'].reset_index(drop=True)
-    val_milling = val_df[val_df['machining_type'] != 'Other']
-    val_conditions = sorted({f"{t}/{c}" for t, c in zip(val_milling['machining_type'], val_milling['condition_id'])})
 
     print(f"📂 成功載入 {len(df)} 筆影像資料！(包含立銑、直銑與 Other 負面教材)")
-    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張（驗證集的刀訓練時不會看到）")
+    print(f"🧪 訓練 {len(train_df)} 張 / 驗證 {len(val_df)} 張（每一刀各抽一部分照片驗證）")
 
     archived = archive_current('Classifier')
     if archived:
@@ -196,7 +194,8 @@ def main():
                 'val_acc': val_acc,
                 'train_images': len(train_df),
                 'val_images': len(val_df),
-                'val_conditions': val_conditions,
+                # 訓練、驗證用過的照片（內容雜湊），批量驗證頁靠它判斷上傳的照片是否訓練過
+                'train_photos': sorted(set(train_df['md5']) | set(val_df['md5'])),
                 'preprocess': PREPROCESS_VERSION,
             })
             print("  👉 已儲存最佳分類器模型！")

@@ -1,0 +1,66 @@
+# 網頁介面的主題：淺色與深色各一套，預設跟著電腦的系統設定切換
+# （右上角選單 → Settings 也可以手動切換）。
+# 要在專案根目錄執行 streamlit run 才會讀到這個檔案（start_app.cmd 就是這樣啟動的）。
+
+[theme]
+# 英文與數字用 Inter、中文用 Noto Sans TC（由 webapp/style.css 從 Google Fonts 載入）；
+# 沒有網路時改用電腦內建的微軟正黑體
+font = "Inter, 'Noto Sans TC', 'Microsoft JhengHei', sans-serif"
+codeFont = "'JetBrains Mono', Consolas, monospace"
+headingFontSizes = ["2rem", "1.5rem", "1.25rem", "1.0625rem", "0.9375rem", "0.875rem"]
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+baseRadius = "0.625rem"
+buttonRadius = "0.5rem"
+metricValueFontSize = "1.625rem"
+metricValueFontWeight = 650
+showWidgetBorder = true
+showSidebarBorder = false
+
+[theme.light]
+primaryColor = "#4F46E5"
+backgroundColor = "#F5F6FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#101828"
+borderColor = "#E4E7EC"
+dataframeBorderColor = "#E9EBF0"
+dataframeHeaderBackgroundColor = "#F8F9FB"
+codeBackgroundColor = "#F2F4F7"
+linkColor = "#4F46E5"
+blueColor = "#3E63DD"
+greenColor = "#16A34A"
+redColor = "#E5484D"
+violetColor = "#7C3AED"
+chartCategoricalColors = ["#4F46E5", "#F59E0B", "#10B981", "#EF4444", "#0EA5E9", "#A855F7", "#EC4899", "#64748B", "#84CC16", "#F97316"]
+chartSequentialColors = ["#EEF2FF", "#E0E7FF", "#C7D2FE", "#A5B4FC", "#818CF8", "#6366F1", "#4F46E5", "#4338CA", "#3730A3", "#312E81"]
+
+# 淺色主題的側邊欄用深藍色
+[theme.light.sidebar]
+primaryColor = "#818CF8"
+backgroundColor = "#0F172A"
+secondaryBackgroundColor = "#1B2437"
+textColor = "#CBD5E1"
+borderColor = "#243049"
+
+[theme.dark]
+primaryColor = "#6366F1"
+backgroundColor = "#0B0F17"
+secondaryBackgroundColor = "#151B27"
+textColor = "#E4E7EE"
+borderColor = "#252D3D"
+dataframeBorderColor = "#232A39"
+dataframeHeaderBackgroundColor = "#131926"
+codeBackgroundColor = "#131926"
+linkColor = "#A5B4FC"
+blueColor = "#5B7CFA"
+greenColor = "#22C55E"
+redColor = "#F06A6A"
+violetColor = "#A78BFA"
+chartCategoricalColors = ["#818CF8", "#FBBF24", "#34D399", "#F87171", "#38BDF8", "#C084FC", "#F472B6", "#94A3B8", "#A3E635", "#FB923C"]
+chartSequentialColors = ["#312E81", "#3730A3", "#4338CA", "#4F46E5", "#6366F1", "#818CF8", "#A5B4FC", "#C7D2FE", "#E0E7FF", "#EEF2FF"]
+
+[theme.dark.sidebar]
+primaryColor = "#818CF8"
+backgroundColor = "#070A10"
+secondaryBackgroundColor = "#121826"
+textColor = "#C3C9D6"
+borderColor = "#1C2333"

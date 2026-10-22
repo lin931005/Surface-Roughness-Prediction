@@ -1,0 +1,395 @@
+/* 網頁介面的樣式，搭配 .streamlit/config.toml 的主題色使用。
+   自訂的顏色都寫成 light-dark(淺色, 深色)，會跟著 Streamlit 目前的主題切換；
+   側邊欄有自己的深色主題，裡面的 light-dark() 會用深色的值。 */
+
+/* config.toml 指定的字型；沒有網路時會改用電腦內建的字型 */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+/* ---------- 版面 ---------- */
+.stApp [data-testid="stMainBlockContainer"] {
+  max-width: 1360px;
+  padding-top: 4.25rem;
+  padding-bottom: 5rem;
+}
+
+/* Streamlit 內建的 Material Symbols 圖示字型 */
+.ms {
+  font-family: "Material Symbols Rounded";
+  font-weight: normal;
+  font-style: normal;
+  font-size: 1.25em;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  display: inline-block;
+  font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ---------- 卡片：key 以 card 開頭的 st.container(border=True) ---------- */
+.stApp [class*="st-key-card"] {
+  background: light-dark(#FFFFFF, #111723);
+  border-radius: 16px;
+  box-shadow: 0 1px 2px light-dark(rgb(16 24 40 / 0.04), rgb(0 0 0 / 0.25)),
+              0 4px 16px -8px light-dark(rgb(16 24 40 / 0.08), rgb(0 0 0 / 0.35));
+}
+
+.stApp [data-testid="stMetric"] {
+  background: light-dark(#FFFFFF, #111723);
+  border-radius: 14px;
+}
+.stApp [data-testid="stMetricValue"] {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* ---------- 頁首 ---------- */
+.page-head {
+  margin: 0 0 0.5rem;
+}
+.page-head .eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.65rem 0.25rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: light-dark(#4338CA, #A5B4FC);
+  background: light-dark(rgb(79 70 229 / 0.08), rgb(129 140 248 / 0.12));
+}
+.page-head .eyebrow .ms {
+  font-size: 1.1rem;
+}
+.stApp .page-head h1 {
+  margin: 0.75rem 0 0.35rem;
+  padding: 0;
+  font-size: 1.875rem;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+.page-head p {
+  margin: 0;
+  max-width: 62rem;
+  font-size: 0.975rem;
+  color: light-dark(#5B6475, #98A1B3);
+}
+
+/* ---------- 卡片標題 ---------- */
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.card-head .icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 10px;
+  color: light-dark(#4F46E5, #A5B4FC);
+  background: light-dark(#EEF0FF, rgb(99 102 241 / 0.16));
+}
+.card-head .t {
+  font-size: 1.0625rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.card-head .s {
+  font-size: 0.825rem;
+  color: light-dark(#667085, #8F98AA);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Ra 結果 ---------- */
+.ra-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 1.5rem 2rem;
+  padding: 1.75rem 2rem;
+  border-radius: 18px;
+  color: #FFFFFF;
+  background:
+    radial-gradient(120% 160% at 100% 0%, rgb(255 255 255 / 0.18) 0%, transparent 55%),
+    linear-gradient(135deg, #3730A3 0%, #4F46E5 45%, #7C3AED 100%);
+  box-shadow: 0 18px 40px -20px rgb(79 70 229 / 0.75);
+}
+.ra-hero.cv {
+  background:
+    radial-gradient(120% 160% at 100% 0%, rgb(255 255 255 / 0.18) 0%, transparent 55%),
+    linear-gradient(135deg, #0F766E 0%, #0891B2 55%, #2563EB 100%);
+  box-shadow: 0 18px 40px -20px rgb(8 145 178 / 0.7);
+}
+.ra-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  opacity: 0.88;
+}
+.ra-value {
+  margin: 0.35rem 0 0.5rem;
+  font-size: clamp(2.75rem, 5vw, 3.75rem);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.ra-unit {
+  margin-left: 0.4rem;
+  font-size: 0.42em;
+  font-weight: 600;
+  letter-spacing: 0;
+  opacity: 0.85;
+}
+.ra-note {
+  font-size: 0.85rem;
+  opacity: 0.82;
+}
+.ra-facts {
+  display: grid;
+  gap: 0.6rem;
+}
+.ra-facts .fact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 0.95rem;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.12);
+  border: 1px solid rgb(255 255 255 / 0.16);
+}
+.ra-facts .fact span {
+  flex: none;
+  font-size: 0.82rem;
+  opacity: 0.82;
+}
+.ra-facts .fact b {
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-align: right;
+}
+@media (max-width: 760px) {
+  .ra-hero {
+    grid-template-columns: 1fr;
+    padding: 1.4rem;
+  }
+  .stApp .page-head h1 {
+    font-size: 1.5rem;
+  }
+}
+
+/* ---------- 取樣結果的圖例 ---------- */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.legend .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  background: light-dark(#F2F4F7, rgb(255 255 255 / 0.06));
+}
+.legend .chip i {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 3px;
+}
+.legend .chip b {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 尚未上傳影像 ---------- */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 300px;
+  padding: 2rem 1rem;
+  border-radius: 12px;
+  border: 1.5px dashed light-dark(#D5D9E2, #283043);
+  background: light-dark(#FAFBFD, #0E131D);
+  color: light-dark(#667085, #8D96A8);
+  text-align: center;
+  font-size: 0.875rem;
+}
+.empty .ms {
+  margin-bottom: 0.35rem;
+  font-size: 2.75rem;
+  color: light-dark(#A4ACBD, #4B5468);
+}
+.empty b {
+  font-size: 1rem;
+  font-weight: 600;
+  color: light-dark(#344054, #C9CFDB);
+}
+
+/* ---------- 元件 ---------- */
+.stApp [data-testid="stBaseButton-primary"]:not(:disabled) {
+  box-shadow: 0 1px 2px rgb(16 24 40 / 0.1), 0 8px 18px -8px light-dark(rgb(79 70 229 / 0.6), rgb(99 102 241 / 0.7));
+  transition: transform 0.15s ease, filter 0.15s ease;
+}
+.stApp [data-testid="stBaseButton-primary"]:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.stApp [data-testid="stFileUploaderDropzone"] {
+  border: 1.5px dashed light-dark(#C9CFDB, #2C3446);
+  border-radius: 12px;
+  background: light-dark(#FAFBFF, #0F1420);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.stApp [data-testid="stFileUploaderDropzone"]:hover {
+  border-color: light-dark(#4F46E5, #818CF8);
+  background: light-dark(#F5F5FF, #121933);
+}
+
+.stApp [data-testid="stImage"] img {
+  border-radius: 10px;
+}
+.stApp [data-testid="stImageCaption"] {
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  color: light-dark(#667085, #8F98AA);
+}
+
+/* ---------- 側邊欄 ---------- */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0 0 0.5rem;
+}
+.brand-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 12px;
+  color: #FFFFFF;
+  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+  box-shadow: 0 8px 20px -8px rgb(99 102 241 / 0.8);
+}
+.brand-mark .ms {
+  font-size: 1.4rem;
+}
+.brand-name {
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: light-dark(#0F172A, #F8FAFC);
+}
+.brand-sub {
+  font-size: 0.78rem;
+  opacity: 0.6;
+}
+.nav-label {
+  margin: 0.75rem 0 0 0.2rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.5;
+}
+.user-card {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  border-radius: 12px;
+  background: light-dark(#F1F5F9, rgb(255 255 255 / 0.04));
+  border: 1px solid light-dark(#E2E8F0, rgb(255 255 255 / 0.07));
+}
+.user-card .avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  color: #FFFFFF;
+  background: linear-gradient(135deg, #22D3EE 0%, #6366F1 100%);
+}
+.user-card .name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: light-dark(#0F172A, #F1F5F9);
+}
+.user-card .sub {
+  font-size: 0.75rem;
+  opacity: 0.65;
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  opacity: 0.85;
+}
+.status-pill .dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: #22C55E;
+  box-shadow: 0 0 0 3px rgb(34 197 94 / 0.2);
+}
+.status-pill.off .dot {
+  background: #EF4444;
+  box-shadow: 0 0 0 3px rgb(239 68 68 / 0.2);
+}
+
+/* ---------- 登入頁 ---------- */
+.login-head {
+  margin: 3.5rem 0 1.5rem;
+  text-align: center;
+}
+.login-head .brand-mark {
+  width: 3.5rem;
+  height: 3.5rem;
+  margin: 0 auto 1.1rem;
+  border-radius: 16px;
+}
+.login-head .brand-mark .ms {
+  font-size: 1.9rem;
+}
+.stApp .login-head h1 {
+  margin: 0 0 0.4rem;
+  padding: 0;
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+.login-head p {
+  margin: 0;
+  color: light-dark(#5B6475, #98A1B3);
+}
+.login-foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  margin: 1rem 0 0;
+  font-size: 0.8rem;
+  color: light-dark(#667085, #8F98AA);
+}

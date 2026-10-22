@@ -14,6 +14,8 @@
 
 ```text
 5000 - BETTER/
+├── .streamlit/
+│   └── config.toml             # 網頁介面的主題（淺色、深色）
 ├── data/                       # 訓練資料與資料清單
 │   └── example/                # 測試照片（每刀一張，不會用於訓練）
 ├── results/                    # 訓練完成的模型與預測結果
@@ -26,7 +28,8 @@
 │   └── train_traditional_ml.py # 訓練傳統視覺 (OpenCV + Random Forest) 對照模型
 ├── webapp/
 │   ├── app/main.py             # FastAPI 後端
-│   └── streamlit_app.py        # Streamlit 使用者介面
+│   ├── streamlit_app.py        # Streamlit 使用者介面
+│   └── style.css               # 使用者介面的樣式
 ├── model_versions.py           # 模型版本備份與切換工具
 ├── preprocessing.py            # 影像前處理（訓練、驗證與線上推論共用）
 ├── project_root.py             # 專案路徑工具
@@ -106,6 +109,8 @@ python -m streamlit run webapp/streamlit_app.py
 
 - Streamlit 介面：<http://localhost:8501>
 - FastAPI 文件：<http://localhost:2578/docs>（所有 API 都需要在 `X-API-Key` 標頭帶上 `.env` 裡的 `CNC_API_KEY`，可在文件頁右上角的 Authorize 輸入）
+
+網頁介面有淺色與深色兩種主題，預設跟著電腦的系統設定（右上角選單 → Settings 可手動切換）。主題設定在 `.streamlit/config.toml`，要在專案根目錄啟動 Streamlit 才會套用，修改後需要重新啟動 Streamlit。
 
 ## 訓練模型
 
